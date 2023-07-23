@@ -214,70 +214,36 @@ async fn logger(driver: Driver<'static, USB>) {
 fn setup_pio_task_sm0<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, PIO0, 0>, pin: impl PioPin) {
     // Setup sm0
 
-    // Send data serially to pin
+    // Send data serially to pin with one start bit and stop bit, Manhester 31 bits
     let prg = pio_proc::pio_asm!(
-        //  .side_set 1 opt
-        //  .wrap_target
-        //      set x, 31
-        //  do_one:
-        //      nop side 1 [3]
-        //      jmp bitloop
-        //  do_zero:
-        //      nop side 0 [4]
-        //  bitloop:
-        //      jmp x-- end
-        //      out y,1
-        //      jmp !y do_zero
-        //      jmp do_one
-        //  end:
-        //      irq 3
-        //  .wrap
         r#"
         .side_set 1 opt
-        set y 0 side 0
-        do_1:
-            nop         side 0 [5] ; Low for 6 cycles (5 delay, +1 for nop)
-            jmp continue side 1 [3] ; High for 4 cycles. 'get_bit' takes another 2 cycles
-        do_0:
-            nop         side 1 [5] ; Output high for 6 cycles
-            nop         side 0 [3] ; Output low for 4 cycles
+        start:
+            jmp get_first
+        get_bit:
+            out x, 1               ; Always shift out one bit from OSR to X, so we can do conditional jump
+        output:
+            jmp !x do_zero
+        do_one:
+            nop         side 1 [6] ;
+            jmp continue side 0 [3] ;
+        do_zero:
+            nop         side 0 [6] ;
+            nop         side 1 [3] ;
         continue:
             jmp y-- get_bit
-            irq 3       side 0
-            jmp do_1
-        get_bit:
-            out x, 1               ; Always shift out one bit from OSR to X, so we can
-            jmp !x do_0            ; branch on it. Autopull refills the OSR when empty.
-            jmp do_1
-
+        end:
+            nop         side 0 [1] ;
+            nop         side 1 [6] ;
+            irq 3       side 0 [5] ;
+        get_first:
+            out x, 1
+            nop         side 1 [6] ; Low for 6 cycles (5 delay, +1 for nop)
+            nop         side 0 [3] ; High for 4 cycles. 'get_bit' takes another 2 cycles
+            set y 31 side 0
+            jmp output
         "#,
     );
-        //  r#"
-        //  .side_set 1 opt
-        //  .origin 0
-        //      set pindirs, 1
-        //      set x, 31
-        //  .wrap_target
-
-
-        //  do_zero:
-        //  do_one:
-
-        //  bitloop:
-        //      out y,1 [18]
-        //      jmp x-- bitloop
-        //      irq 3
-        //  .wrap
-        //  "#,
-
-//          r#"
-//          .origin 0
-//          set pindirs, 1
-//          set x, 31
-//          .wrap_target
-//          out pins,1
-//          jmp x-- wrap_target [18]
-//          .wrap"#,
 
     let relocated = RelocatedProgram::new(&prg.program);
     let mut cfg = ConfigPio::default();
@@ -285,12 +251,12 @@ fn setup_pio_task_sm0<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, 
     cfg.use_program(&pio.load_program(&relocated), &[&out_pin]);
     cfg.set_out_pins(&[]);
     cfg.set_set_pins(&[]);
-    cfg.clock_divider = (U56F8!(125_000_000) / 200 / 200).to_fixed();
+    cfg.clock_divider = (U56F8!(125_000_000) / 140 / 100).to_fixed();
     //  cfg.fifo_join = FifoJoin::TxOnly;
     cfg.shift_out = ShiftConfig {
         auto_fill: true,
-        threshold: 16,
-        direction: ShiftDirection::Right,
+        threshold: 32,
+        direction: ShiftDirection::Left,
     };
     sm.set_pin_dirs(PioPinDirection::Out, &[&out_pin]);
     sm.set_config(&cfg);
@@ -306,9 +272,8 @@ async fn pio_task_sm0(mut irq: PioIrq<'static, PIO0, 3>, mut sm: StateMachine<'s
         log::info!("Pio Start TX");
         sm.set_enable(true);
         sm.tx().wait_push(v).await;
-        //  v ^= 0xffff;
-        //  irq.wait().await;
-        //  log::info!("PioIrq3");
+        irq.wait().await;
+        log::info!("PioIrq3");
 
         Timer::after(Duration::from_secs(1)).await;
         sm.set_enable(false);

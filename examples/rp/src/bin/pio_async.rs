@@ -5,15 +5,23 @@
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
-use embassy_rp::peripherals::PIO0;
-use embassy_rp::pio::{Common, Config, InterruptHandler, Irq, Pio, PioPin, ShiftDirection, StateMachine};
+use embassy_rp::peripherals::{PIO0, USB};
+use embassy_rp::pio::{Common, Config, InterruptHandler, Pio, Irq as PioIrq, PioPin, ShiftDirection, StateMachine};
+use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
+use embassy_time::{Duration, Timer};
 use fixed::traits::ToFixed;
 use fixed_macro::types::U56F8;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
+    USBCTRL_IRQ => USBInterruptHandler<USB>;
 });
+
+#[embassy_executor::task]
+async fn logger_task(driver: Driver<'static, USB>) {
+    embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
+}
 
 fn setup_pio_task_sm0<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, PIO0, 0>, pin: impl PioPin) {
     // Setup sm0
@@ -33,6 +41,7 @@ fn setup_pio_task_sm0<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, 
     cfg.set_out_pins(&[&out_pin]);
     cfg.set_set_pins(&[&out_pin]);
     cfg.clock_divider = (U56F8!(125_000_000) / 20 / 200).to_fixed();
+    //  cfg.fifo_join = FifoJoin::TxOnly;
     cfg.shift_out.auto_fill = true;
     sm.set_config(&cfg);
 }
@@ -45,7 +54,7 @@ async fn pio_task_sm0(mut sm: StateMachine<'static, PIO0, 0>) {
     loop {
         sm.tx().wait_push(v).await;
         v ^= 0xffff;
-        info!("Pushed {:032b} to FIFO", v);
+        log::info!("Pushed {:032b} to FIFO", v);
     }
 }
 
@@ -75,7 +84,7 @@ async fn pio_task_sm1(mut sm: StateMachine<'static, PIO0, 1>) {
     sm.set_enable(true);
     loop {
         let rx = sm.rx().wait_pull().await;
-        info!("Pulled {:032b} from FIFO", rx);
+        log::info!("Pulled {:032b} from FIFO", rx);
     }
 }
 
@@ -99,11 +108,11 @@ fn setup_pio_task_sm2<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, 
 }
 
 #[embassy_executor::task]
-async fn pio_task_sm2(mut irq: Irq<'static, PIO0, 3>, mut sm: StateMachine<'static, PIO0, 2>) {
+async fn pio_task_sm2(mut irq: PioIrq<'static, PIO0, 3>, mut sm: StateMachine<'static, PIO0, 2>) {
     sm.set_enable(true);
     loop {
         irq.wait().await;
-        info!("IRQ trigged");
+        log::info!("IRQ trigged");
     }
 }
 
@@ -121,10 +130,23 @@ async fn main(spawner: Spawner) {
         ..
     } = Pio::new(pio, Irqs);
 
+    let driver = Driver::new(p.USB, Irqs);
+    spawner.spawn(logger_task(driver)).unwrap();
+    Timer::after(Duration::from_secs(5)).await;
+    log::info!("Logger initialized!");
+    Timer::after(Duration::from_secs(5)).await;
+
     setup_pio_task_sm0(&mut common, &mut sm0, p.PIN_0);
     setup_pio_task_sm1(&mut common, &mut sm1);
     setup_pio_task_sm2(&mut common, &mut sm2);
     spawner.spawn(pio_task_sm0(sm0)).unwrap();
     spawner.spawn(pio_task_sm1(sm1)).unwrap();
     spawner.spawn(pio_task_sm2(irq3, sm2)).unwrap();
+
+    let mut counter = 0;
+    loop {
+        counter += 1;
+        log::info!("Tick {}", counter);
+        Timer::after(Duration::from_secs(1)).await;
+    }
 }

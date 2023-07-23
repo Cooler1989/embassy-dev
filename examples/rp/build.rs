@@ -13,6 +13,8 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
+use vergen::*;
+
 fn main() {
     // Put `memory.x` in our output directory and ensure it's
     // on the linker search path.
@@ -33,4 +35,6 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
     println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
+
+    vergen(SHORT_SHA | COMMIT_DATE).unwrap();
 }

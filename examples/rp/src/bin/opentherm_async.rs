@@ -10,18 +10,18 @@
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_rp::{bind_interrupts, Peripheral};
 use embassy_futures::join::join;
 use embassy_rp::gpio::{AnyPin, Input, Level, Output, Pull};
-use embassy_rp::pio::{Common, Config as ConfigPio, Direction as PioPinDirection, InterruptHandler as InterruptHandlerPio, Irq as PioIrq, Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine};
 use embassy_rp::i2c::{self, Config as ConfigI2c, InterruptHandler};
-use embassy_rp::peripherals::USB;
-use embassy_rp::peripherals::PIO0;
-use embassy_rp::peripherals::I2C1;
+use embassy_rp::peripherals::{I2C1, PIO0 as PIO_TX, PIO1 as PIO_RX, USB};
+use embassy_rp::pio::{
+    Common, Config as ConfigPio, Direction as PioPinDirection, InterruptHandler as InterruptHandlerPio, Irq as PioIrq,
+    Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine,
+};
 use embassy_rp::relocate::RelocatedProgram;
-use embassy_rp::usb::{Driver};
-use embassy_rp::usb::InterruptHandler as UsbInterruptHandler;
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
+use embassy_rp::{bind_interrupts, Peripheral};
+use embassy_time::{with_timeout, Duration, Timer};
 use embedded_hal_async::i2c::I2c;
 use fixed::traits::ToFixed;
 use fixed_macro::types::U56F8;
@@ -30,7 +30,8 @@ use {defmt_rtt as _, panic_probe as _};
 bind_interrupts!(struct Irqs {
     I2C1_IRQ => InterruptHandler<I2C1>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
-    PIO0_IRQ_0 => InterruptHandlerPio<PIO0>;
+    PIO0_IRQ_0 => InterruptHandlerPio<PIO_TX>;
+    PIO1_IRQ_0 => InterruptHandlerPio<PIO_RX>;
 });
 
 fn swap_nibbles(v: u32) -> u32 {
@@ -40,8 +41,7 @@ fn swap_nibbles(v: u32) -> u32 {
 }
 
 #[repr(u8)]
-pub enum MessageType
-{
+pub enum MessageType {
     //  master to slave messages
     ReadData = 0x0,
     WriteData = 0x1,
@@ -54,9 +54,14 @@ pub enum MessageType
     UnknownDataId = 0x7,
 }
 
+const SM0: usize = 0x0;
+const SM1: usize = 0x1;
+
+const SM_TX: usize = SM0;
+const SM_RX: usize = SM0;
+
 #[repr(u8)]
-pub enum OpenThermMessageCode
-{
+pub enum OpenThermMessageCode {
     Status = 0x00,
     TSet = 0x01,
     BoilerTemperature = 0x25,
@@ -72,7 +77,7 @@ pub trait Error: core::fmt::Debug {
     /// By using this method, I2C errors freely defined by HAL implementations
     /// can be converted to a set of generic I2C errors upon which generic
     /// code can act.
-    fn kind(&self) -> ()/*ErrorKind*/;
+    fn kind(&self) -> () /*ErrorKind*/;
 }
 
 /// This just defines the error type, to be used by the other traits.
@@ -85,47 +90,36 @@ impl<T: ErrorType> ErrorType for &mut T {
     type Error = T::Error;
 }
 
-pub trait OpenThermDevice: ErrorType{
-    async fn read( &mut self,
-                   cmd: OpenThermMessageCode,
-                   ) -> Result<(), Self::Error> {
+pub trait OpenThermDevice: ErrorType {
+    async fn read(&mut self, cmd: OpenThermMessageCode) -> Result<(), Self::Error> {
         //  place here some conversion and frame assembly
-        self.transaction(cmd)
-            .await
+        self.transaction(cmd).await
     }
-    async fn transaction(
-        &mut self,
-        cmd: OpenThermMessageCode,
-    ) -> Result<(), Self::Error>;
+    async fn transaction(&mut self, cmd: OpenThermMessageCode) -> Result<(), Self::Error>;
 }
 
 pub trait OpenThermBus {
     type Error;
-    async fn transact(&mut self, data: u32) -> Result<u32,Self::Error>;
+    async fn transact(&mut self, data: u32) -> Result<u32, Self::Error>;
 }
 
-struct PioOpenTherm
-{
-}
+struct PioOpenTherm {}
 
 impl PioOpenTherm {
-    pub fn new() -> PioOpenTherm
-    {
-        PioOpenTherm{}
+    pub fn new() -> PioOpenTherm {
+        PioOpenTherm {}
     }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-enum OtError{
+enum OtError {
     FAIL,
     SUCESS,
 }
 
-impl OpenThermBus for PioOpenTherm
-{
+impl OpenThermBus for PioOpenTherm {
     type Error = OtError;
-    async fn transact(&mut self, data: u32) -> Result<u32,Self::Error>
-    {
+    async fn transact(&mut self, data: u32) -> Result<u32, Self::Error> {
         Timer::after(Duration::from_secs(2)).await;
         Ok(32u32)
     }
@@ -180,10 +174,9 @@ mod mcp23017 {
 }
 
 #[embassy_executor::task]
-async fn button(pin:AnyPin)
-{
+async fn button(pin: AnyPin) {
     let mut button = Input::new(pin, Pull::Up);
-    loop{
+    loop {
         button.wait_for_low().await;
         log::info!("Buttion pressed!");
         button.wait_for_high().await;
@@ -193,7 +186,6 @@ async fn button(pin:AnyPin)
 
 #[embassy_executor::task]
 async fn blink(pin: AnyPin) {
-
     let mut led = Output::new(pin, Level::Low);
     loop {
         log::info!("led on!");
@@ -211,10 +203,13 @@ async fn logger(driver: Driver<'static, USB>) {
     embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
 }
 
-fn setup_pio_task_sm0<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, PIO0, 0>, pin: impl PioPin) {
-    // Setup sm0
-
+fn setup_pio_task_opentherm_tx<'a>(
+    pio: &mut Common<'a, PIO_TX>,
+    sm: &mut StateMachine<'a, PIO_TX, 0>,
+    pin: impl PioPin,
+) {
     // Send data serially to pin with one start bit and stop bit, Manhester 31 bits
+    // Cycle is 14 PIO instructions
     let prg = pio_proc::pio_asm!(
         r#"
         .side_set 1 opt
@@ -263,11 +258,10 @@ fn setup_pio_task_sm0<'a>(pio: &mut Common<'a, PIO0>, sm: &mut StateMachine<'a, 
 }
 
 #[embassy_executor::task]
-async fn pio_task_sm0(mut irq: PioIrq<'static, PIO0, 3>, mut sm: StateMachine<'static, PIO0, 0>) {
-
+async fn pio_task_opentherm_tx(mut irq: PioIrq<'static, PIO_TX, 3>, mut sm: StateMachine<'static, PIO_TX, SM_TX>) {
     Timer::after(Duration::from_secs(4)).await;
     sm.set_enable(true);
-    let mut v = 0xffffffff;
+    let v = 0xffffffff;
     loop {
         log::info!("Pio Start TX");
         sm.set_enable(true);
@@ -283,28 +277,156 @@ async fn pio_task_sm0(mut irq: PioIrq<'static, PIO0, 3>, mut sm: StateMachine<'s
     }
 }
 
+fn setup_pio_task_opentherm_rx<'a>(
+    pio: &mut Common<'a, PIO_RX>,
+    sm: &mut StateMachine<'a, PIO_RX, SM_RX>,
+    pin: impl PioPin,
+    pin_out: impl PioPin,
+) {
+    // Setupm sm1
+
+    // Read 0b10101 repeatedly until ISR is full
+    let prg = pio_proc::pio_asm!(
+        //  THIS is polarity specific. TODO: Provide separate program for reversed polarity
+        //  period is 14 instructions long
+        //  Manual push to allow to reset the state when something wrong happens
+        //  First prototype doesn't allow to unstack when pin is high for long time. Some amount of
+        //  level transitions must happen to reset the state.
+        //  IRQ may be used as an error indicator
+        r#"
+        .side_set 1 opt
+        .origin 0
+        set y 1
+        .wrap_target
+        reset:
+            set x 31
+        check_one:
+            jmp pin decrement [5] side 1
+            jmp reset
+        decrement:
+            jmp x-- check_one
+
+        start:
+            wait 0 pin 0 side 1
+            set x 0 side 0
+
+            set x 31 [1]   side 1   ; Wait until all 32 bits are shifted in
+            nop [7]     side 0
+
+        read_jmp_condition:
+            nop [3]   ; wait around 3/4 cycle to hit middle of first nibble of next bit
+            jmp pin start_of_0  side 1 ; If signal is 1 again, it's another 0 bit, otherwise it's a 1
+            jmp start_of_1      side 0
+
+        start_of_1:            ; We are 0.25 bits into a 0 - signal is high
+            wait 1 pin 0  side 0     ; Wait for the 1->0 transition - at this point we are 0.5 into the bit
+            set y 1
+            in y, 1 [1] side 1       ; Emit a 1, sleep 3/4 of a bit
+            jmp x-- read_jmp_condition
+            jmp exit
+
+        start_of_0:            ; We are 0.25 bits into a 1 - signal is 1
+            wait 0 pin 0  side 0     ; Wait for the 0->1 transition - at this point we are 0.5 into the bit
+            set y 0
+            in y, 1 [1]   side 1     ; Emit a 0, sleep 3/4 of a bit
+            jmp x-- read_jmp_condition
+
+        exit:       ;  ignore last bits or rather check if it is there for confirmation
+                    ;  change for manual push
+            push
+        .wrap
+        "#,
+        //  set x 0
+        //  set y 1
+        //  start_of_1:            ; We are 0.25 bits into a 0 - signal is high
+        //      wait 0 pin 0       ; Wait for the 1->0 transition - at this point we are 0.5 into the bit
+        //      in y, 1 [8]        ; Emit a 0, sleep 3/4 of a bit
+        //      jmp pin start_of_0 ; If signal is 1 again, it's another 0 bit, otherwise it's a 1
+
+        //  .wrap_target
+        //  start_of_0:            ; We are 0.25 bits into a 1 - signal is 1
+        //      wait 1 pin 0       ; Wait for the 0->1 transition - at this point we are 0.5 into the bit
+        //      in x, 1 [8]        ; Emit a 1, sleep 3/4 of a bit
+        //      jmp pin start_of_0 ; If signal is 0 again, it's another 1 bit otherwise it's a 0
+        //  .wrap
+
+        //  set x, 0x15
+        //  .wrap_target
+        //  in x, 5 [31]
+        //  .wrap
+    );
+
+    let relocated = RelocatedProgram::new(&prg.program);
+    let mut cfg = ConfigPio::default();
+    let in_pin = pio.make_pio_pin(pin);
+    let out_pin = pio.make_pio_pin(pin_out);
+    cfg.use_program(&pio.load_program(&relocated), &[&out_pin]);
+    cfg.set_jmp_pin(&in_pin);
+    cfg.set_in_pins(&[&in_pin]);
+    //  cfg.set_out_pins(&[&out_pin]);
+    cfg.clock_divider = (U56F8!(125_000_000) / 140 / 100).to_fixed();
+    cfg.shift_in = ShiftConfig {
+        auto_fill: false,
+        threshold: 32,
+        direction: ShiftDirection::Left,
+    };
+    sm.set_pin_dirs(PioPinDirection::In, &[&in_pin]);
+    sm.set_pin_dirs(PioPinDirection::Out, &[&out_pin]);
+    sm.set_config(&cfg);
+}
+
+#[embassy_executor::task]
+async fn pio_task_opentherm_rx(mut sm: StateMachine<'static, PIO_RX, SM_RX>) {
+    sm.set_enable(true);
+    loop {
+        let rx = sm.rx().wait_pull().await; //  IRQ may be used as error indicator
+        log::info!("Pulled {:#010x} from FIFO", rx);
+        let parity_result = u32::count_ones(rx);
+        if (parity_result % 2 == 1) {
+            log::info!("Parity error!");
+            loop {
+                Timer::after(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let driver = Driver::new(p.USB, Irqs);
-    let pio = p.PIO0;
+    let pio_tx = p.PIO0;
+    let pio_rx = p.PIO1;
     //  spawner.spawn(blink(p.PIN_25.into())).unwrap();
+
     spawner.spawn(logger(driver)).unwrap();
     spawner.spawn(button(p.PIN_28.into())).unwrap();
 
-    let Pio {
-        mut common,
-        irq3,
-        mut sm0,
-        mut sm1,
-        mut sm2,
-        ..
-    } = Pio::new(pio, Irqs);
+    {
+        let Pio {
+            mut common,
+            irq3,
+            mut sm0,
+            ..
+        } = Pio::new(pio_tx, Irqs);
 
-    setup_pio_task_sm0(&mut common, &mut sm0, p.PIN_0);
-    spawner.spawn(pio_task_sm0(irq3, sm0)).unwrap();
+        setup_pio_task_opentherm_tx(&mut common, &mut sm0, p.PIN_1);
+        spawner.spawn(pio_task_opentherm_tx(irq3, sm0)).unwrap();
+    }
 
-/*
+    {
+        let Pio {
+            mut common,
+            irq3,
+            mut sm0,
+            ..
+        } = Pio::new(pio_rx, Irqs);
+
+        setup_pio_task_opentherm_rx(&mut common, &mut sm0, p.PIN_2, p.PIN_0);
+        spawner.spawn(pio_task_opentherm_rx(sm0)).unwrap();
+    }
+
+    /*
     let Pio {
         mut common,
         sm0: mut sm,
@@ -372,7 +494,6 @@ async fn main(spawner: Spawner) {
     let mut pio_ot = PioOpenTherm::new();
     log::info!("Pio wait OpenTherm transaction");
 
-
     //  pub async fn with_timeout<F: Future>(timeout: Duration, fut: F) -> Result<F::Output, TimeoutError>;
 
     //   ============
@@ -380,7 +501,7 @@ async fn main(spawner: Spawner) {
     let mut counter = 0;
     loop {
         counter += 1;
-        log::info!("Tick {}", counter);
+        //  log::info!("Tick {}", counter);
         Timer::after(Duration::from_secs(1)).await;
 
         let run_ot = pio_ot.transact(24u32);
@@ -389,10 +510,9 @@ async fn main(spawner: Spawner) {
                 Ok(ret) => log::info!("Returned: {}", ret),
                 Err(err) => log::info!("Transaction Error"),
             },
-            Err(error) => log::info!("Transaction Timeout"),
+            Err(error) => (), /* log::info!("Transaction Timeout")*/
         }
-        log::info!("Pio OpenTherm transaction is Done");
-
+        //  log::info!("Pio OpenTherm transaction is Done");
     }
 
     //   ============ I2C Async

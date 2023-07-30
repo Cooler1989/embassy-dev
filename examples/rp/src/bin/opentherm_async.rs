@@ -1,34 +1,32 @@
 //! This example shows how to communicate asynchronous using i2c with external chips.
 //!
-//! Example written for the [`MCP23017 16-Bit I2C I/O Expander with Serial Interface`] chip.
-//! (https://www.microchip.com/en-us/product/mcp23017)
 
 #![no_std]
 #![no_main]
 #![feature(type_alias_impl_trait)]
 #![feature(async_fn_in_trait)]
 
-use defmt::info;
+// use defmt::info;
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
+//  use embassy_futures::join::join;
 use embassy_rp::gpio::{AnyPin, Input, Level, Output, Pull};
-use embassy_rp::i2c::{self, Config as ConfigI2c, InterruptHandler};
-use embassy_rp::peripherals::{I2C1, PIO0 as PIO_TX, PIO1 as PIO_RX, USB};
+// use embassy_rp::i2c::{self, Config as ConfigI2c, InterruptHandler};
+use embassy_rp::peripherals::{/*I2C1,*/ PIO0 as PIO_TX, PIO1 as PIO_RX, USB};
 use embassy_rp::pio::{
     Common, Config as ConfigPio, Direction as PioPinDirection, InterruptHandler as InterruptHandlerPio, Irq as PioIrq,
     Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine,
 };
 use embassy_rp::relocate::RelocatedProgram;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
-use embassy_rp::{bind_interrupts, Peripheral};
+use embassy_rp::{bind_interrupts/*, Peripheral*/};
 use embassy_time::{with_timeout, Duration, Timer};
-use embedded_hal_async::i2c::I2c;
+//  use embedded_hal_async::i2c::I2c;
 use fixed::traits::ToFixed;
 use fixed_macro::types::U56F8;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
-    I2C1_IRQ => InterruptHandler<I2C1>;
+    //  I2C1_IRQ => InterruptHandler<I2C1>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
     PIO0_IRQ_0 => InterruptHandlerPio<PIO_TX>;
     PIO1_IRQ_0 => InterruptHandlerPio<PIO_RX>;
@@ -101,6 +99,13 @@ pub trait OpenThermDevice: ErrorType {
 pub trait OpenThermBus {
     type Error;
     async fn transact(&mut self, data: u32) -> Result<u32, Self::Error>;
+    async fn tx(&mut self, data: u32) -> Result<(), Self::Error>;
+    async fn rx(&mut self) -> Result<u32, Self::Error>;
+}
+
+pub trait OpenThermSlave: OpenThermBus {
+    async fn WaitReceptionRunCallback<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), Self::Error>
+        where F: Fn(u32)->Result<u32,ErrorSpecific>;
 }
 
 struct PioOpenTherm {}
@@ -117,59 +122,62 @@ enum OtError {
     SUCESS,
 }
 
+impl OpenThermSlave for PioOpenTherm {
+    async fn WaitReceptionRunCallback<F, ErrorSpecific>( &mut self, callback: F) -> Result<(), Self::Error>
+        where F: Fn(u32)->Result<u32,ErrorSpecific>
+    {
+        match self.rx().await
+        {
+            Ok(received_data) =>
+            {
+                log::info!("OpenTherm Slave got data: {:#010x}", received_data);
+                match callback(received_data)
+                {
+                    Ok(response) =>
+                    {
+                        log::info!("Slave reponds with data: {:#010x}", response);
+                        //  async fn tx(&mut self, data: u32) -> Result<(), Self::Error>;
+                        match self.tx(response).await
+                        {
+                            Ok(()) =>
+                            {
+                                ()  //  TODO: Should be Err but function expects ()
+                            }
+                            _ => { log::error!("Error to send the response"); }
+                        }
+                    }
+                    Err(error) =>
+                    {
+                        log::error!("Provided callback is not able to figure out the answer");
+                        ()  //  TODO: Should be Err but function expects ()
+                    }
+                }
+            }
+            Err(error) =>
+            {
+                log::error!("OpenTherm Slave Error");
+                ()  //  TODO: Should be Err but function expects ()
+            }
+        }
+        Ok(())
+    }
+}
+
 impl OpenThermBus for PioOpenTherm {
     type Error = OtError;
     async fn transact(&mut self, data: u32) -> Result<u32, Self::Error> {
         Timer::after(Duration::from_secs(2)).await;
+        self.tx(data).await;
         Ok(32u32)
     }
-}
-
-#[allow(dead_code)]
-mod mcp23017 {
-    pub const ADDR: u8 = 0x20; // default addr
-
-    macro_rules! mcpregs {
-        ($($name:ident : $val:expr),* $(,)?) => {
-            $(
-                pub const $name: u8 = $val;
-            )*
-
-            pub fn regname(reg: u8) -> &'static str {
-                match reg {
-                    $(
-                        $val => stringify!($name),
-                    )*
-                    _ => panic!("bad reg"),
-                }
-            }
-        }
+    async fn tx(&mut self, data:u32) -> Result<(), Self::Error>
+    {
+        log::info!("Sending over the wire: {}", data);
+        Ok(())
     }
-
-    // These are correct for IOCON.BANK=0
-    mcpregs! {
-        IODIRA: 0x00,
-        IPOLA: 0x02,
-        GPINTENA: 0x04,
-        DEFVALA: 0x06,
-        INTCONA: 0x08,
-        IOCONA: 0x0A,
-        GPPUA: 0x0C,
-        INTFA: 0x0E,
-        INTCAPA: 0x10,
-        GPIOA: 0x12,
-        OLATA: 0x14,
-        IODIRB: 0x01,
-        IPOLB: 0x03,
-        GPINTENB: 0x05,
-        DEFVALB: 0x07,
-        INTCONB: 0x09,
-        IOCONB: 0x0B,
-        GPPUB: 0x0D,
-        INTFB: 0x0F,
-        INTCAPB: 0x11,
-        GPIOB: 0x13,
-        OLATB: 0x15,
+    async fn rx(&mut self) -> Result<u32,Self::Error>
+    {
+        Ok(0xdaa7)
     }
 }
 
@@ -283,7 +291,7 @@ fn setup_pio_task_opentherm_rx<'a>(
     pin: impl PioPin,
     pin_out: impl PioPin,
 ) {
-    // Setupm sm1
+    // Setup sm1
 
     // Read 0b10101 repeatedly until ISR is full
     let prg = pio_proc::pio_asm!(
@@ -382,7 +390,7 @@ async fn pio_task_opentherm_rx(mut sm: StateMachine<'static, PIO_RX, SM_RX>) {
         let rx = sm.rx().wait_pull().await; //  IRQ may be used as error indicator
         log::info!("Pulled {:#010x} from FIFO", rx);
         let parity_result = u32::count_ones(rx);
-        if (parity_result % 2 == 1) {
+        if parity_result % 2 == 1 {
             log::info!("Parity error!");
             loop {
                 Timer::after(Duration::from_secs(1)).await;
@@ -422,8 +430,48 @@ async fn main(spawner: Spawner) {
             ..
         } = Pio::new(pio_rx, Irqs);
 
+        let _be_unused = irq3;
+
         setup_pio_task_opentherm_rx(&mut common, &mut sm0, p.PIN_2, p.PIN_0);
         spawner.spawn(pio_task_opentherm_rx(sm0)).unwrap();
+    }
+
+
+    Timer::after(Duration::from_secs(5)).await;
+
+    let mut pio_ot = PioOpenTherm::new();
+    log::info!("Pio wait OpenTherm transaction");
+
+    //  pub async fn with_timeout<F: Future>(timeout: Duration, fut: F) -> Result<F::Output, TimeoutError>;
+
+    //   ============
+
+    loop {
+        Timer::after(Duration::from_secs(1)).await;
+
+        //where F: Fn(u32)->Result<u32,ErrorSpecific>
+
+        let slave_boiler_callback = |input| -> Result<u32,OtError>
+        {
+            log::info!("Callback: Simulated boiler received: {}", input);
+            Ok(0xcafefefe)
+        };
+
+        match pio_ot.WaitReceptionRunCallback(slave_boiler_callback).await
+        {
+            Ok(()) => { log::info!("Implement Boiler Simulation reception"); }
+            _ => { log::info!("Boiler Simulation error"); }
+        }
+
+        let run_ot = pio_ot.transact(24u32);
+        match with_timeout(Duration::from_secs(1), run_ot).await {
+            Ok(returned) => match returned {
+                Ok(ret) => log::info!("Returned: {}", ret),
+                Err(_err) => log::info!("Transaction Error"),
+            },
+            Err(_error) => (), /* log::info!("Transaction Timeout")*/
+        }
+        //  log::info!("Pio OpenTherm transaction is Done");
     }
 
     /*
@@ -488,69 +536,4 @@ async fn main(spawner: Spawner) {
         log::info!("Swapped {} words", dout.len());
     }
     */
-
-    Timer::after(Duration::from_secs(5)).await;
-
-    let mut pio_ot = PioOpenTherm::new();
-    log::info!("Pio wait OpenTherm transaction");
-
-    //  pub async fn with_timeout<F: Future>(timeout: Duration, fut: F) -> Result<F::Output, TimeoutError>;
-
-    //   ============
-
-    let mut counter = 0;
-    loop {
-        counter += 1;
-        //  log::info!("Tick {}", counter);
-        Timer::after(Duration::from_secs(1)).await;
-
-        let run_ot = pio_ot.transact(24u32);
-        match with_timeout(Duration::from_secs(1), run_ot).await {
-            Ok(returned) => match returned {
-                Ok(ret) => log::info!("Returned: {}", ret),
-                Err(err) => log::info!("Transaction Error"),
-            },
-            Err(error) => (), /* log::info!("Transaction Timeout")*/
-        }
-        //  log::info!("Pio OpenTherm transaction is Done");
-    }
-
-    //   ============ I2C Async
-
-    let sda = p.PIN_14;
-    let scl = p.PIN_15;
-
-    log::info!("set up i2c ");
-    let mut i2c = i2c::I2c::new_async(p.I2C1, scl, sda, Irqs, ConfigI2c::default());
-
-    use mcp23017::*;
-
-    log::info!("init mcp23017 config for IxpandO");
-    // init - a outputs, b inputs
-    i2c.write(ADDR, &[IODIRA, 0x00]).await.unwrap();
-    i2c.write(ADDR, &[IODIRB, 0xff]).await.unwrap();
-    i2c.write(ADDR, &[GPPUB, 0xff]).await.unwrap(); // pullups
-
-    let mut val = 1;
-    loop {
-        let mut portb = [0];
-
-        i2c.write_read(mcp23017::ADDR, &[GPIOB], &mut portb).await.unwrap();
-        log::info!("portb = {:02x}", portb[0]);
-        i2c.write(mcp23017::ADDR, &[GPIOA, val | portb[0]]).await.unwrap();
-        val = val.rotate_left(1);
-
-        // get a register dump
-        log::info!("getting register dump");
-        let mut regs = [0; 22];
-        i2c.write_read(ADDR, &[0], &mut regs).await.unwrap();
-        // always get the regdump but only display it if portb'0 is set
-        if portb[0] & 1 != 0 {
-            for (idx, reg) in regs.into_iter().enumerate() {
-                log::info!("{} => {:02x}", regname(idx as u8), reg);
-            }
-        }
-
-        Timer::after(Duration::from_millis(100)).await;
-    }
 }

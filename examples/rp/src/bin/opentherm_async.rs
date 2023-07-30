@@ -6,6 +6,7 @@
 #![feature(type_alias_impl_trait)]
 #![feature(async_fn_in_trait)]
 
+use core::fmt;
 // use defmt::info;
 use embassy_executor::Spawner;
 //  use embassy_futures::join::join;
@@ -32,11 +33,11 @@ bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => InterruptHandlerPio<PIO_RX>;
 });
 
-fn swap_nibbles(v: u32) -> u32 {
-    let v = (v & 0x0f0f_0f0f) << 4 | (v & 0xf0f0_f0f0) >> 4;
-    let v = (v & 0x00ff_00ff) << 8 | (v & 0xff00_ff00) >> 8;
-    (v & 0x0000_ffff) << 16 | (v & 0xffff_0000) >> 16
-}
+// fn swap_nibbles(v: u32) -> u32 {
+//     let v = (v & 0x0f0f_0f0f) << 4 | (v & 0xf0f0_f0f0) >> 4;
+//     let v = (v & 0x00ff_00ff) << 8 | (v & 0xff00_ff00) >> 8;
+//     (v & 0x0000_ffff) << 16 | (v & 0xffff_0000) >> 16
+// }
 
 #[repr(u8)]
 pub enum MessageType {
@@ -53,7 +54,7 @@ pub enum MessageType {
 }
 
 const SM0: usize = 0x0;
-const SM1: usize = 0x1;
+//  const SM1: usize = 0x1;
 
 const SM_TX: usize = SM0;
 const SM_RX: usize = SM0;
@@ -65,8 +66,27 @@ pub enum OpenThermMessageCode {
     BoilerTemperature = 0x25,
 }
 
-struct OpenThermMessage {
-    data_value: u16,
+#[derive(PartialEq)]
+pub struct OpenThermMessage {
+    data_value: u32,
+}
+
+impl fmt::LowerHex for OpenThermMessage
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+    {
+        let val = self.data_value;
+        fmt::LowerHex::fmt(&val, f)
+    }
+}
+// #[derive(PartialEq,Debug)]
+impl core::fmt::Debug for OpenThermMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let val = self.data_value;
+        fmt::LowerHex::fmt(&val, f)
+        //  f.debug_struct("OtMsg").
+        //      field("data", &self.data_value).finish()
+    }
 }
 
 pub trait Error: core::fmt::Debug {
@@ -98,14 +118,14 @@ pub trait OpenThermDevice: ErrorType {
 
 pub trait OpenThermBus {
     type Error;
-    async fn transact(&mut self, data: u32) -> Result<u32, Self::Error>;
-    async fn tx(&mut self, data: u32) -> Result<(), Self::Error>;
-    async fn rx(&mut self) -> Result<u32, Self::Error>;
+    async fn transact(&mut self, data: OpenThermMessage) -> Result<OpenThermMessage, Self::Error>;
+    async fn tx(&mut self, data: OpenThermMessage) -> Result<(), Self::Error>;
+    async fn rx(&mut self) -> Result<OpenThermMessage, Self::Error>;
 }
 
 pub trait OpenThermSlave: OpenThermBus {
     async fn WaitReceptionRunCallback<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), Self::Error>
-        where F: Fn(u32)->Result<u32,ErrorSpecific>;
+        where F: Fn(OpenThermMessage)->Result<OpenThermMessage,ErrorSpecific>;
 }
 
 struct PioOpenTherm {}
@@ -124,7 +144,7 @@ enum OtError {
 
 impl OpenThermSlave for PioOpenTherm {
     async fn WaitReceptionRunCallback<F, ErrorSpecific>( &mut self, callback: F) -> Result<(), Self::Error>
-        where F: Fn(u32)->Result<u32,ErrorSpecific>
+        where F: Fn(OpenThermMessage)->Result<OpenThermMessage,ErrorSpecific>
     {
         match self.rx().await
         {
@@ -136,7 +156,7 @@ impl OpenThermSlave for PioOpenTherm {
                     Ok(response) =>
                     {
                         log::info!("Slave reponds with data: {:#010x}", response);
-                        //  async fn tx(&mut self, data: u32) -> Result<(), Self::Error>;
+                        //  async fn tx(&mut self, data: OpenThermMessage) -> Result<(), Self::Error>;
                         match self.tx(response).await
                         {
                             Ok(()) =>
@@ -153,7 +173,7 @@ impl OpenThermSlave for PioOpenTherm {
                     }
                 }
             }
-            Err(error) =>
+            Err(_error) =>
             {
                 log::error!("OpenTherm Slave Error");
                 ()  //  TODO: Should be Err but function expects ()
@@ -165,19 +185,19 @@ impl OpenThermSlave for PioOpenTherm {
 
 impl OpenThermBus for PioOpenTherm {
     type Error = OtError;
-    async fn transact(&mut self, data: u32) -> Result<u32, Self::Error> {
+    async fn transact(&mut self, data: OpenThermMessage) -> Result<OpenThermMessage, Self::Error> {
         Timer::after(Duration::from_secs(2)).await;
-        self.tx(data).await;
-        Ok(32u32)
+        _ = self.tx(data).await;
+        Ok(OpenThermMessage{data_value:32u32})
     }
-    async fn tx(&mut self, data:u32) -> Result<(), Self::Error>
+    async fn tx(&mut self, data:OpenThermMessage) -> Result<(), Self::Error>
     {
-        log::info!("Sending over the wire: {}", data);
+        log::info!("Sending over the wire: {:#010x}", data);
         Ok(())
     }
-    async fn rx(&mut self) -> Result<u32,Self::Error>
+    async fn rx(&mut self) -> Result<OpenThermMessage,Self::Error>
     {
-        Ok(0xdaa7)
+        Ok(OpenThermMessage{data_value: 0xdaa7})
     }
 }
 
@@ -451,10 +471,10 @@ async fn main(spawner: Spawner) {
 
         //where F: Fn(u32)->Result<u32,ErrorSpecific>
 
-        let slave_boiler_callback = |input| -> Result<u32,OtError>
+        let slave_boiler_callback = |input| -> Result<OpenThermMessage,OtError>
         {
-            log::info!("Callback: Simulated boiler received: {}", input);
-            Ok(0xcafefefe)
+            log::info!("Callback: Simulated boiler received: {:#010x}", input);
+            Ok(OpenThermMessage{data_value:0xcafefefe})
         };
 
         match pio_ot.WaitReceptionRunCallback(slave_boiler_callback).await
@@ -463,10 +483,10 @@ async fn main(spawner: Spawner) {
             _ => { log::info!("Boiler Simulation error"); }
         }
 
-        let run_ot = pio_ot.transact(24u32);
+        let run_ot = pio_ot.transact(OpenThermMessage{data_value:24u32});
         match with_timeout(Duration::from_secs(1), run_ot).await {
             Ok(returned) => match returned {
-                Ok(ret) => log::info!("Returned: {}", ret),
+                Ok(ret) => log::info!("Returned: {:#010x}", ret),
                 Err(_err) => log::info!("Transaction Error"),
             },
             Err(_error) => (), /* log::info!("Transaction Timeout")*/

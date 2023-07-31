@@ -1,4 +1,4 @@
-//! This example shows how to communicate asynchronous using i2c with external chips.
+//! This example shows how to communicate asynchronous OpenTherm interface bus
 //!
 
 #![no_std]
@@ -7,37 +7,27 @@
 #![feature(async_fn_in_trait)]
 
 use core::fmt;
-// use defmt::info;
+
 use embassy_executor::Spawner;
-//  use embassy_futures::join::join;
+use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{AnyPin, Input, Level, Output, Pull};
-// use embassy_rp::i2c::{self, Config as ConfigI2c, InterruptHandler};
-use embassy_rp::peripherals::{/*I2C1,*/ PIO0 as PIO_TX, PIO1 as PIO_RX, USB};
+use embassy_rp::peripherals::{PIO0 as PIO_TX, PIO1 as PIO_RX, USB};
 use embassy_rp::pio::{
     Common, Config as ConfigPio, Direction as PioPinDirection, InterruptHandler as InterruptHandlerPio, Irq as PioIrq,
     Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine,
 };
 use embassy_rp::relocate::RelocatedProgram;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
-use embassy_rp::{bind_interrupts/*, Peripheral*/};
 use embassy_time::{with_timeout, Duration, Timer};
-//  use embedded_hal_async::i2c::I2c;
 use fixed::traits::ToFixed;
 use fixed_macro::types::U56F8;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
-    //  I2C1_IRQ => InterruptHandler<I2C1>;
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
     PIO0_IRQ_0 => InterruptHandlerPio<PIO_TX>;
     PIO1_IRQ_0 => InterruptHandlerPio<PIO_RX>;
 });
-
-// fn swap_nibbles(v: u32) -> u32 {
-//     let v = (v & 0x0f0f_0f0f) << 4 | (v & 0xf0f0_f0f0) >> 4;
-//     let v = (v & 0x00ff_00ff) << 8 | (v & 0xff00_ff00) >> 8;
-//     (v & 0x0000_ffff) << 16 | (v & 0xffff_0000) >> 16
-// }
 
 #[repr(u8)]
 pub enum MessageType {
@@ -71,10 +61,8 @@ pub struct OpenThermMessage {
     data_value: u32,
 }
 
-impl fmt::LowerHex for OpenThermMessage
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-    {
+impl fmt::LowerHex for OpenThermMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let val = self.data_value;
         fmt::LowerHex::fmt(&val, f)
     }
@@ -126,7 +114,8 @@ pub trait OpenThermBus {
 
 pub trait OpenThermSlave: OpenThermBus {
     async fn wait_reception_run_callback<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), Self::Error>
-        where F: Fn(Self::Output)->Result<Self::Output,ErrorSpecific>;
+    where
+        F: Fn(Self::Output) -> Result<Self::Output, ErrorSpecific>;
 }
 
 struct PioOpenTherm {}
@@ -144,40 +133,35 @@ enum OtError {
 }
 
 impl OpenThermSlave for PioOpenTherm {
-    async fn wait_reception_run_callback<F, ErrorSpecific>( &mut self, callback: F) -> Result<(), Self::Error>
-        where F: Fn(Self::Output)->Result<Self::Output,ErrorSpecific>
+    async fn wait_reception_run_callback<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), Self::Error>
+    where
+        F: Fn(Self::Output) -> Result<Self::Output, ErrorSpecific>,
     {
-        match self.rx().await
-        {
-            Ok(received_data) =>
-            {
+        match self.rx().await {
+            Ok(received_data) => {
                 log::info!("OpenTherm Slave got data: {:#010x}", received_data);
-                match callback(received_data)
-                {
-                    Ok(response) =>
-                    {
+                match callback(received_data) {
+                    Ok(response) => {
                         log::info!("Slave reponds with data: {:#010x}", response);
                         //  async fn tx(&mut self, data: Self::Output) -> Result<(), Self::Error>;
-                        match self.tx(response).await
-                        {
-                            Ok(()) =>
-                            {
-                                ()  //  TODO: Should be Err but function expects ()
+                        match self.tx(response).await {
+                            Ok(()) => {
+                                () //  TODO: Should be Err but function expects ()
                             }
-                            _ => { log::error!("Error to send the response"); }
+                            _ => {
+                                log::error!("Error to send the response");
+                            }
                         }
                     }
-                    Err(_error) =>
-                    {
+                    Err(_error) => {
                         log::error!("Provided callback is not able to figure out the answer");
-                        ()  //  TODO: Should be Err but function expects ()
+                        () //  TODO: Should be Err but function expects ()
                     }
                 }
             }
-            Err(_error) =>
-            {
+            Err(_error) => {
                 log::error!("OpenTherm Slave Error");
-                ()  //  TODO: Should be Err but function expects ()
+                () //  TODO: Should be Err but function expects ()
             }
         }
         Ok(())
@@ -190,16 +174,14 @@ impl OpenThermBus for PioOpenTherm {
     async fn transact(&mut self, data: Self::Output) -> Result<Self::Output, Self::Error> {
         Timer::after(Duration::from_secs(2)).await;
         _ = self.tx(data).await;
-        Ok(Self::Output{data_value:32u32})
+        Ok(Self::Output { data_value: 32u32 })
     }
-    async fn tx(&mut self, data:Self::Output) -> Result<(), Self::Error>
-    {
+    async fn tx(&mut self, data: Self::Output) -> Result<(), Self::Error> {
         log::info!("Sending over the wire: {:#010x}", data);
         Ok(())
     }
-    async fn rx(&mut self) -> Result<Self::Output,Self::Error>
-    {
-        Ok(Self::Output{data_value: 0xdaa7})
+    async fn rx(&mut self) -> Result<Self::Output, Self::Error> {
+        Ok(Self::Output { data_value: 0xdaa7 })
     }
 }
 
@@ -366,24 +348,6 @@ fn setup_pio_task_opentherm_rx<'a>(
             push
         .wrap
         "#,
-        //  set x 0
-        //  set y 1
-        //  start_of_1:            ; We are 0.25 bits into a 0 - signal is high
-        //      wait 0 pin 0       ; Wait for the 1->0 transition - at this point we are 0.5 into the bit
-        //      in y, 1 [8]        ; Emit a 0, sleep 3/4 of a bit
-        //      jmp pin start_of_0 ; If signal is 1 again, it's another 0 bit, otherwise it's a 1
-
-        //  .wrap_target
-        //  start_of_0:            ; We are 0.25 bits into a 1 - signal is 1
-        //      wait 1 pin 0       ; Wait for the 0->1 transition - at this point we are 0.5 into the bit
-        //      in x, 1 [8]        ; Emit a 1, sleep 3/4 of a bit
-        //      jmp pin start_of_0 ; If signal is 0 again, it's another 1 bit otherwise it's a 0
-        //  .wrap
-
-        //  set x, 0x15
-        //  .wrap_target
-        //  in x, 5 [31]
-        //  .wrap
     );
 
     let relocated = RelocatedProgram::new(&prg.program);
@@ -458,34 +422,31 @@ async fn main(spawner: Spawner) {
         spawner.spawn(pio_task_opentherm_rx(sm0)).unwrap();
     }
 
-
     Timer::after(Duration::from_secs(5)).await;
 
     let mut pio_ot = PioOpenTherm::new();
     log::info!("Pio wait OpenTherm transaction");
-
-    //  pub async fn with_timeout<F: Future>(timeout: Duration, fut: F) -> Result<F::Output, TimeoutError>;
 
     //   ============
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
 
-        //where F: Fn(u32)->Result<u32,ErrorSpecific>
-
-        let slave_boiler_callback = |input| -> Result<OpenThermMessage,OtError>
-        {
+        let slave_boiler_callback = |input| -> Result<OpenThermMessage, OtError> {
             log::info!("Callback: Simulated boiler received: {:#010x}", input);
-            Ok(OpenThermMessage{data_value:0xcafefefe})
+            Ok(OpenThermMessage { data_value: 0xcafefefe })
         };
 
-        match pio_ot.wait_reception_run_callback(slave_boiler_callback).await
-        {
-            Ok(()) => { log::info!("Implement Boiler Simulation reception"); }
-            _ => { log::info!("Boiler Simulation error"); }
+        match pio_ot.wait_reception_run_callback(slave_boiler_callback).await {
+            Ok(()) => {
+                log::info!("Implement Boiler Simulation reception");
+            }
+            _ => {
+                log::info!("Boiler Simulation error");
+            }
         }
 
-        let run_ot = pio_ot.transact(OpenThermMessage{data_value:24u32});
+        let run_ot = pio_ot.transact(OpenThermMessage { data_value: 24u32 });
         match with_timeout(Duration::from_secs(1), run_ot).await {
             Ok(returned) => match returned {
                 Ok(ret) => log::info!("Returned: {:#010x}", ret),
@@ -495,67 +456,4 @@ async fn main(spawner: Spawner) {
         }
         //  log::info!("Pio OpenTherm transaction is Done");
     }
-
-    /*
-    let Pio {
-        mut common,
-        sm0: mut sm,
-        ..
-    } = Pio::new(pio, Irqs);
-
-    let prg = pio_proc::pio_asm!(
-        ".origin 0",
-        "set pindirs,1",
-        ".wrap_target",
-        "set y,7",
-        "loop:",
-        "out x,4",
-        "in x,4",
-        "jmp y--, loop",
-        ".wrap",
-    );
-    let relocated = RelocatedProgram::new(&prg.program);
-
-    let mut cfg = ConfigPio::default();
-    // Pin config
-    let out_pin = common.make_pio_pin(p.PIN_16);
-    cfg.set_out_pins(&[&out_pin]);
-    cfg.set_set_pins(&[&out_pin]);
-
-    cfg.use_program(&common.load_program(&relocated), &[]);
-    cfg.clock_divider = (U56F8!(125_000_000) / U56F8!(10_000)).to_fixed();
-    cfg.shift_in = ShiftConfig {
-        auto_fill: true,
-        threshold: 32,
-        direction: ShiftDirection::Left,
-    };
-    cfg.shift_out = ShiftConfig {
-        auto_fill: true,
-        threshold: 32,
-        direction: ShiftDirection::Right,
-    };
-
-    sm.set_config(&cfg);
-    sm.set_enable(true);
-
-    let mut dma_out_ref = p.DMA_CH0.into_ref();
-    let mut dma_in_ref = p.DMA_CH1.into_ref();
-    let mut dout = [0x12345678u32; 29];
-    for i in 1..dout.len() {
-        dout[i] = (dout[i - 1] & 0x0fff_ffff) * 13 + 7;
-    }
-    let mut din = [0u32; 29];
-    loop {
-        let (rx, tx) = sm.rx_tx();
-        join(
-            tx.dma_push(dma_out_ref.reborrow(), &dout),
-            rx.dma_pull(dma_in_ref.reborrow(), &mut din),
-        )
-        .await;
-        for i in 0..din.len() {
-            assert_eq!(din[i], swap_nibbles(dout[i]));
-        }
-        log::info!("Swapped {} words", dout.len());
-    }
-    */
 }

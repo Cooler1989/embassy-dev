@@ -12,8 +12,9 @@ use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{AnyPin, Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIO0 as PIO_TX, PIO1 as PIO_RX, USB};
+//  use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
 use embassy_rp::pio::{
-    Common, Config as ConfigPio, Direction as PioPinDirection, InterruptHandler as InterruptHandlerPio, Irq as PioIrq,
+    Common as PioCommon, Config as ConfigPio, Instance as PioInstance, Direction as PioPinDirection, InterruptHandler as InterruptHandlerPio, Irq as PioIrq,
     Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine,
 };
 use embassy_rp::relocate::RelocatedProgram;
@@ -118,11 +119,67 @@ pub trait OpenThermSlave: OpenThermBus {
         F: Fn(Self::Output) -> Result<Self::Output, ErrorSpecific>;
 }
 
-struct PioOpenTherm {}
+struct PioOpenTherm<'a, PIO_RX:PioInstance, const SM_RX: usize, PIO_TX:PioInstance, const SM_TX: usize> {
+    //  common_rx_: PioCommon<'a, PIO_RX>,
+    sm_rx_: StateMachine<'a, PIO_RX, SM_RX>,
+    irq_rx_:PioIrq<'a, PIO_RX, 3>,
 
-impl PioOpenTherm {
-    pub fn new() -> PioOpenTherm {
-        PioOpenTherm {}
+    //  common_tx_: PioCommon<'a, PIO_TX>,
+    sm_tx_: StateMachine<'a, PIO_TX, SM_TX>,
+    irq_tx_:PioIrq<'a, PIO_TX, 3>,
+
+    //  pin_out: PO,
+}
+
+impl<'a, PIO_RX:PioInstance, const SM_RX: usize, PIO_TX:PioInstance, const SM_TX: usize> PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> {
+    pub fn new(
+        common_rx_arg: &mut PioCommon<'a, PIO_RX>,
+        mut sm_rx_arg: StateMachine<'a, PIO_RX, SM_RX>,
+        irq_rx_arg:PioIrq<'a, PIO_RX, 3>,
+        common_tx_arg: &mut PioCommon<'a, PIO_TX>,
+        mut sm_tx_arg: StateMachine<'a, PIO_TX, SM_TX>,
+        irq_tx_arg: PioIrq<'a, PIO_TX, 3>,
+        pin_rx_arg: impl PioPin,
+        pin_rx_out_arg: impl PioPin,
+        pin_tx_out_arg: impl PioPin,
+    ) -> PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> {
+
+        setup_pio_task_opentherm_tx(common_tx_arg, &mut sm_tx_arg, pin_tx_out_arg);
+        //spawner.spawn(pio_task_opentherm_tx(irq3, sm0)).unwrap();
+        setup_pio_task_opentherm_rx(common_rx_arg, &mut sm_rx_arg, pin_rx_arg, pin_rx_out_arg);
+        //  setup_pio_task_opentherm_rx<'a>(
+        //      pio: &mut PioCommon<'a, PIO_RX>,
+        //      sm: &mut StateMachine<'a, PIO_RX, SM_RX>,
+        //      pin: impl PioPin,
+        //      pin_out: impl PioPin,
+
+        sm_tx_arg.set_enable(true);
+
+        PioOpenTherm {
+            //  common_rx_: common_rx_arg,
+            sm_rx_: sm_rx_arg,
+            irq_rx_: irq_rx_arg,
+            //  common_tx_: common_tx_arg,
+            sm_tx_: sm_tx_arg,
+            irq_tx_: irq_tx_arg,
+        }
+    }
+
+    async fn run(&mut self) -> ()
+    {
+        //  async fn pio_task_opentherm_rx(mut sm: StateMachine<'static, PIO_RX, SM_RX>) {
+            //  loop {
+                let rx = self.sm_rx_.rx().wait_pull().await; //  IRQ may be used as error indicator
+                log::info!("Pulled {:#010x} from FIFO", rx);
+                let parity_result = u32::count_ones(rx);
+                if parity_result % 2 == 1 {
+                    log::info!("Parity error!");
+                    loop {
+                        Timer::after(Duration::from_secs(1)).await;
+                    }
+                }
+            //  }
+        //  }
     }
 }
 
@@ -132,8 +189,9 @@ enum OtError {
     SUCESS,
 }
 
-impl OpenThermSlave for PioOpenTherm {
-    async fn wait_reception_run_callback<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), Self::Error>
+impl<'a, PIO_RX:PioInstance, const SM_RX: usize, PIO_TX:PioInstance, const SM_TX: usize> OpenThermSlave for PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> {
+
+    async fn wait_reception_run_callback<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), <PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> as OpenThermBus>::Error>
     where
         F: Fn(Self::Output) -> Result<Self::Output, ErrorSpecific>,
     {
@@ -143,7 +201,6 @@ impl OpenThermSlave for PioOpenTherm {
                 match callback(received_data) {
                     Ok(response) => {
                         log::info!("Slave reponds with data: {:#010x}", response);
-                        //  async fn tx(&mut self, data: Self::Output) -> Result<(), Self::Error>;
                         match self.tx(response).await {
                             Ok(()) => {
                                 () //  TODO: Should be Err but function expects ()
@@ -168,19 +225,19 @@ impl OpenThermSlave for PioOpenTherm {
     }
 }
 
-impl OpenThermBus for PioOpenTherm {
+impl<'a, PIO_RX:PioInstance, const SM_RX: usize, PIO_TX:PioInstance, const SM_TX: usize> OpenThermBus for PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> {
     type Error = OtError;
     type Output = OpenThermMessage;
-    async fn transact(&mut self, data: Self::Output) -> Result<Self::Output, Self::Error> {
+    async fn transact(&mut self, data: Self::Output) -> Result<<PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> as OpenThermBus>::Output, <PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> as OpenThermBus>::Error> {
         Timer::after(Duration::from_secs(2)).await;
         _ = self.tx(data).await;
         Ok(Self::Output { data_value: 32u32 })
     }
-    async fn tx(&mut self, data: Self::Output) -> Result<(), Self::Error> {
+    async fn tx(&mut self, data: Self::Output) -> Result<(), <PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> as OpenThermBus>::Error> {
         log::info!("Sending over the wire: {:#010x}", data);
         Ok(())
     }
-    async fn rx(&mut self) -> Result<Self::Output, Self::Error> {
+    async fn rx(&mut self) -> Result<<PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> as OpenThermBus>::Output, <PioOpenTherm<'a, PIO_RX, SM_RX, PIO_TX, SM_TX> as OpenThermBus>::Error> {
         Ok(Self::Output { data_value: 0xdaa7 })
     }
 }
@@ -215,9 +272,9 @@ async fn logger(driver: Driver<'static, USB>) {
     embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
 }
 
-fn setup_pio_task_opentherm_tx<'a>(
-    pio: &mut Common<'a, PIO_TX>,
-    sm: &mut StateMachine<'a, PIO_TX, 0>,
+fn setup_pio_task_opentherm_tx<'a, PIO: PioInstance, const SM: usize>(
+    pio: &mut PioCommon<'a, PIO>,
+    sm: &mut StateMachine<'a, PIO, SM>,
     pin: impl PioPin,
 ) {
     // Send data serially to pin with one start bit and stop bit, Manhester 31 bits
@@ -289,9 +346,9 @@ async fn pio_task_opentherm_tx(mut irq: PioIrq<'static, PIO_TX, 3>, mut sm: Stat
     }
 }
 
-fn setup_pio_task_opentherm_rx<'a>(
-    pio: &mut Common<'a, PIO_RX>,
-    sm: &mut StateMachine<'a, PIO_RX, SM_RX>,
+fn setup_pio_task_opentherm_rx<'a, PIO: PioInstance, const SM: usize>(
+    pio: &mut PioCommon<'a, PIO>,
+    sm: &mut StateMachine<'a, PIO, SM>,
     pin: impl PioPin,
     pin_out: impl PioPin,
 ) {
@@ -389,42 +446,23 @@ async fn pio_task_opentherm_rx(mut sm: StateMachine<'static, PIO_RX, SM_RX>) {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let driver = Driver::new(p.USB, Irqs);
-    let pio_tx = p.PIO0;
-    let pio_rx = p.PIO1;
     //  spawner.spawn(blink(p.PIN_25.into())).unwrap();
 
     spawner.spawn(logger(driver)).unwrap();
     spawner.spawn(button(p.PIN_28.into())).unwrap();
 
-    {
-        let Pio {
-            mut common,
-            irq3,
-            mut sm0,
-            ..
-        } = Pio::new(pio_tx, Irqs);
+    //  setup_pio_task_opentherm_rx(&mut common, &mut sm0_rx, p.PIN_2, p.PIN_0);
+    //  spawner.spawn(pio_task_opentherm_rx(sm0_rx)).unwrap();
 
-        setup_pio_task_opentherm_tx(&mut common, &mut sm0, p.PIN_1);
-        spawner.spawn(pio_task_opentherm_tx(irq3, sm0)).unwrap();
-    }
+    let mut pio_rx = Pio::new(p.PIO0, Irqs);
+    let mut pio_tx = Pio::new(p.PIO1, Irqs);
 
-    {
-        let Pio {
-            mut common,
-            irq3,
-            mut sm0,
-            ..
-        } = Pio::new(pio_rx, Irqs);
-
-        let _be_unused = irq3;
-
-        setup_pio_task_opentherm_rx(&mut common, &mut sm0, p.PIN_2, p.PIN_0);
-        spawner.spawn(pio_task_opentherm_rx(sm0)).unwrap();
-    }
+    let mut pio_ot = PioOpenTherm::new(&mut pio_tx.common, pio_tx.sm0, pio_tx.irq3,
+        &mut pio_rx.common, pio_rx.sm0, pio_rx.irq3,
+        p.PIN_2, p.PIN_0, p.PIN_1);
 
     Timer::after(Duration::from_secs(5)).await;
 
-    let mut pio_ot = PioOpenTherm::new();
     log::info!("Pio wait OpenTherm transaction");
 
     //   ============

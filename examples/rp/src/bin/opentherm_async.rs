@@ -442,6 +442,10 @@ async fn pio_task_opentherm_rx(mut sm: StateMachine<'static, PIO_RX, SM_RX>) {
     }
 }
 
+mod version {
+    include!(concat!(env!("OUT_DIR"), "/version.rs"));
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -468,6 +472,7 @@ async fn main(spawner: Spawner) {
     //   ============
 
     loop {
+        log::info!("Version: {} {}", version::commit_date(), version::short_sha());
         Timer::after(Duration::from_secs(1)).await;
 
         let slave_boiler_callback = |input| -> Result<OpenThermMessage, OtError> {

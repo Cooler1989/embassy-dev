@@ -4,6 +4,8 @@ name = "embassy-rp-examples"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
+[build-dependencies]
+vergen = "0.1"
 
 [dependencies]
 embassy-embedded-hal = { version = "0.1.0", path = "../../embassy-embedded-hal", features = ["defmt"] }

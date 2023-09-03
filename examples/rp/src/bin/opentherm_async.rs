@@ -114,7 +114,7 @@ pub trait OpenThermBus {
 }
 
 pub trait OpenThermSlave: OpenThermBus {
-    async fn wait_reception_run_callback<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), Self::Error>
+    async fn wait_reception_run_callback_respond<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), Self::Error>
     where
         F: Fn(Self::Output) -> Result<Self::Output, ErrorSpecific>;
 }
@@ -145,15 +145,13 @@ impl<'a, PioRx:PioInstance, const SM_RX: usize, PioTx:PioInstance, const SM_TX: 
     ) -> PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> {
 
         setup_pio_task_opentherm_tx(common_tx_arg, &mut sm_tx_arg, pin_tx_out_arg);
+
         //spawner.spawn(pio_task_opentherm_tx(irq3, sm0)).unwrap();
+
         setup_pio_task_opentherm_rx(common_rx_arg, &mut sm_rx_arg, pin_rx_arg, pin_rx_out_arg);
-        //  setup_pio_task_opentherm_rx<'a>(
-        //      pio: &mut PioCommon<'a, PioRx>,
-        //      sm: &mut StateMachine<'a, PioRx, SM_RX>,
-        //      pin: impl PioPin,
-        //      pin_out: impl PioPin,
 
         sm_tx_arg.set_enable(true);
+        sm_rx_arg.set_enable(true);
 
         PioOpenTherm {
             //  common_rx_: common_rx_arg,
@@ -168,17 +166,17 @@ impl<'a, PioRx:PioInstance, const SM_RX: usize, PioTx:PioInstance, const SM_TX: 
     async fn run(&mut self) -> ()
     {
         //  async fn pio_task_opentherm_rx(mut sm: StateMachine<'static, PioRx, SM_RX>) {
-            //  loop {
-                let rx = self.sm_rx_.rx().wait_pull().await; //  IRQ may be used as error indicator
-                log::info!("Pulled {:#010x} from FIFO", rx);
-                let parity_result = u32::count_ones(rx);
-                if parity_result % 2 == 1 {
-                    log::info!("Parity error!");
-                    loop {
-                        Timer::after(Duration::from_secs(1)).await;
-                    }
+        //  loop {
+            let rx = self.sm_rx_.rx().wait_pull().await; //  IRQ may be used as error indicator
+            log::info!("Pulled {:#010x} from FIFO", rx);
+            let parity_result = u32::count_ones(rx);
+            if parity_result % 2 == 1 {
+                log::info!("Parity error!");
+                loop {
+                    Timer::after(Duration::from_secs(1)).await;
                 }
-            //  }
+            }
+        //  }
         //  }
     }
 }
@@ -191,7 +189,7 @@ enum OtError {
 
 impl<'a, PioRx:PioInstance, const SM_RX: usize, PioTx:PioInstance, const SM_TX: usize> OpenThermSlave for PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> {
 
-    async fn wait_reception_run_callback<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), <PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Error>
+    async fn wait_reception_run_callback_respond<F, ErrorSpecific>(&mut self, callback: F) -> Result<(), <PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Error>
     where
         F: Fn(Self::Output) -> Result<Self::Output, ErrorSpecific>,
     {
@@ -201,6 +199,7 @@ impl<'a, PioRx:PioInstance, const SM_RX: usize, PioTx:PioInstance, const SM_TX: 
                 match callback(received_data) {
                     Ok(response) => {
                         log::info!("Slave reponds with data: {:#010x}", response);
+                        Timer::after(Duration::from_millis(250)).await;
                         match self.tx(response).await {
                             Ok(()) => {
                                 () //  TODO: Should be Err but function expects ()
@@ -228,17 +227,41 @@ impl<'a, PioRx:PioInstance, const SM_RX: usize, PioTx:PioInstance, const SM_TX: 
 impl<'a, PioRx:PioInstance, const SM_RX: usize, PioTx:PioInstance, const SM_TX: usize> OpenThermBus for PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> {
     type Error = OtError;
     type Output = OpenThermMessage;
-    async fn transact(&mut self, data: Self::Output) -> Result<<PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Output, <PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Error> {
+
+    async fn transact(&mut self, data: Self::Output) -> Result<<PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Output, <PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Error>
+    {
         Timer::after(Duration::from_secs(2)).await;
         _ = self.tx(data).await;
         Ok(Self::Output { data_value: 32u32 })
     }
+
     async fn tx(&mut self, data: Self::Output) -> Result<(), <PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Error> {
         log::info!("Sending over the wire: {:#010x}", data);
+
+        self.sm_tx_.set_enable(true);
+        self.sm_tx_.tx().wait_push(data.data_value).await;
+        self.irq_tx_.wait().await;
+        self.sm_tx_.restart();
+        self.sm_tx_.set_enable(false);
+        log::info!("PioTxIrq3");
         Ok(())
     }
-    async fn rx(&mut self) -> Result<<PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Output, <PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Error> {
-        Ok(Self::Output { data_value: 0xdaa7 })
+
+    async fn rx(&mut self) ->
+        Result<<PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Output, <PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> as OpenThermBus>::Error>
+    {
+        log::info!("Wait data RX...");
+        let rx = self.sm_rx_.rx().wait_pull().await; //  IRQ may be used as error indicator
+        log::info!("Pulled {:#010x} from FIFO", rx);
+        let parity_result = u32::count_ones(rx);
+        if parity_result % 2 == 1 {
+            log::info!("Parity error! Assert!");
+            loop {
+                Timer::after(Duration::from_secs(1)).await;
+            }
+        }
+
+        Ok(Self::Output { data_value: rx })
     }
 }
 
@@ -475,14 +498,13 @@ async fn main(spawner: Spawner) {
 
     loop {
         log::info!("Version: {} {}", version::commit_date(), version::short_sha());
-        Timer::after(Duration::from_secs(1)).await;
 
         let slave_boiler_callback = |input| -> Result<OpenThermMessage, OtError> {
             log::info!("Callback: Simulated boiler received: {:#010x}", input);
             Ok(OpenThermMessage { data_value: 0xcafefefe })
         };
 
-        match pio_ot.wait_reception_run_callback(slave_boiler_callback).await {
+        match pio_ot.wait_reception_run_callback_respond(slave_boiler_callback).await {
             Ok(()) => {
                 log::info!("Implement Boiler Simulation reception");
             }
@@ -491,14 +513,14 @@ async fn main(spawner: Spawner) {
             }
         }
 
-        let run_ot = pio_ot.transact(OpenThermMessage { data_value: 24u32 });
-        match with_timeout(Duration::from_secs(1), run_ot).await {
-            Ok(returned) => match returned {
-                Ok(ret) => log::info!("Returned: {:#010x}", ret),
-                Err(_err) => log::info!("Transaction Error"),
-            },
-            Err(_error) => (), /* log::info!("Transaction Timeout")*/
-        }
+        //  let run_ot = pio_ot.transact(OpenThermMessage { data_value: 24u32 });
+        //  match with_timeout(Duration::from_secs(1), run_ot).await {
+        //      Ok(returned) => match returned {
+        //          Ok(ret) => log::info!("Returned: {:#010x}", ret),
+        //          Err(_err) => log::info!("Transaction Error"),
+        //      },
+        //      Err(_error) => (), /* log::info!("Transaction Timeout")*/
+        //  }
         //  log::info!("Pio OpenTherm transaction is Done");
     }
 }

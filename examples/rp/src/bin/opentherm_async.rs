@@ -7,16 +7,16 @@
 #![feature(async_fn_in_trait)]
 
 use embassy_executor::Spawner;
+use embassy_opentherm::pio_opentherm::{OtError, PioOpenTherm};
+use embassy_opentherm::{OpenThermMessage, OpenThermSlave}; //  TODO: rename it to opentherm-async
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{AnyPin, Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIO0 as PioTx, PIO1 as PioRx, USB};
 //  use embassy_hal_common::{into_ref, Peripheral, PeripheralRef};
-use embassy_rp::pio::{ InterruptHandler as InterruptHandlerPio, Pio};
+use embassy_rp::pio::{InterruptHandler as InterruptHandlerPio, Pio};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_time::{Duration, Timer};
 use {defmt_rtt as _, panic_probe as _};
-use embassy_opentherm::{OpenThermMessage, OpenThermSlave};   //  TODO: rename it to opentherm-async
-use embassy_opentherm::pio_opentherm::{PioOpenTherm, OtError};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
@@ -111,9 +111,17 @@ async fn main(spawner: Spawner) {
     let mut pio_rx = Pio::new(p.PIO0, Irqs);
     let mut pio_tx = Pio::new(p.PIO1, Irqs);
 
-    let mut pio_ot = PioOpenTherm::new(&mut pio_tx.common, pio_tx.sm0, pio_tx.irq3,
-        &mut pio_rx.common, pio_rx.sm0, pio_rx.irq3,
-        p.PIN_2, p.PIN_0, p.PIN_1);
+    let mut pio_ot = PioOpenTherm::new(
+        &mut pio_tx.common,
+        pio_tx.sm0,
+        pio_tx.irq3,
+        &mut pio_rx.common,
+        pio_rx.sm0,
+        pio_rx.irq3,
+        p.PIN_2,
+        p.PIN_0,
+        p.PIN_1,
+    );
 
     Timer::after(Duration::from_secs(5)).await;
 
@@ -126,7 +134,7 @@ async fn main(spawner: Spawner) {
 
         let slave_boiler_callback = |input| -> Result<OpenThermMessage, OtError> {
             log::info!("Callback: Simulated boiler received: {:#010x}", input);
-            Ok(OpenThermMessage::new( 0xcafefefe ))
+            Ok(OpenThermMessage::new(0xcafefefe))
         };
 
         match pio_ot.wait_reception_run_callback_respond(slave_boiler_callback).await {

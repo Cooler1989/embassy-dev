@@ -1,6 +1,7 @@
 use core::fmt;
 
 #[repr(u8)]
+#[derive(PartialEq)]
 pub enum MessageType {
     //  master to slave messages
     ReadData = 0x0,
@@ -14,6 +15,24 @@ pub enum MessageType {
     UnknownDataId = 0x7,
 }
 
+impl From<MessageType> for u32
+{
+    fn from (item: MessageType) -> Self
+    {
+        item as u32
+        //  match item {
+        //      MessageType::ReadData => 0b000 as u32,
+        //      MessageType::WriteData => 0b001 as u32,
+        //      MessageType::InvalidData => 0b010 as u32,
+        //      MessageType::Reserved => 0b011 as u32,
+        //      MessageType::ReadAck => 0b100 as u32,
+        //      MessageType::WriteAck => 0b101 as u32,
+        //      MessageType::DataInvalid => 0b110 as u32,
+        //      MessageType::UnknownDataId => 0b111 as u32,
+        //  }
+    }
+}
+
 #[repr(u8)]
 pub enum OpenThermMessageCode {
     Status = 0x00,
@@ -21,18 +40,58 @@ pub enum OpenThermMessageCode {
     BoilerTemperature = 0x25,
 }
 
+#[repr(u16)]
+pub enum OpenThermDataValue { u16 }
+
+#[derive(PartialEq)]
+enum OpenThermMessageValue {
+    Value(u16)
+}
+
 #[derive(PartialEq)]
 pub struct OpenThermMessage {
-    data_value_: u32,
+    //  data_value_: u32,
+
+    // start bit
+    // parity bit
+    msg_type_: MessageType,
+    //  spare 4b
+    data_id_: u8,
+    value_: OpenThermMessageValue,
+    //  stop bit
+}
+
+impl From<OpenThermMessageValue> for u16
+{
+    fn from (item: OpenThermMessageValue) -> Self
+    {
+        item.Value as u16
+    }
+}
+
+impl From<OpenThermMessage> for u32
+{
+    fn from (item: OpenThermMessage) -> Self
+    {
+        //  item.data_value_ as u32
+        item.value_ as u32
+    }
 }
 
 impl OpenThermMessage {
     pub fn new(value: u32) -> Self
     {
-        Self{ data_value_: value }
+        Self
+        {
+            // data_value_: value,
+            msg_type_:(value >> 29).into(),
+            data_id_: 0u8,
+            value_: OpenThermMessageValue::Value(0u16),
+        }
     }
     pub fn get_raw_data_value(self) -> u32 {
-        self.data_value_
+        // self.data_value_
+        into()
     }
 }
 

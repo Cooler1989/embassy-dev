@@ -90,6 +90,14 @@ async fn logger(driver: Driver<'static, USB>) {
 //      }
 //  }
 
+struct BoilerSimulation {}
+
+impl BoilerSimulation {
+    pub fn input(data: OpenThermMessage) -> Result<OpenThermMessage, OtError> {
+        Ok(OpenThermMessage::new(0x00))
+    }
+}
+
 mod version {
     include!(concat!(env!("OUT_DIR"), "/version.rs"));
 }

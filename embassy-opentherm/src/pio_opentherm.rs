@@ -212,6 +212,9 @@ impl<'a, PioRx:PioInstance, const SM_RX: usize, PioTx:PioInstance, const SM_TX: 
 pub enum OtError {
     FAIL,
     SUCESS,
+    GenericError,
+    InvalidData,
+    UnknownDataId,
 }
 
 impl<'a, PioRx:PioInstance, const SM_RX: usize, PioTx:PioInstance, const SM_TX: usize> OpenThermSlave for PioOpenTherm<'a, PioRx, SM_RX, PioTx, SM_TX> {

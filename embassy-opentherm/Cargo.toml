@@ -16,6 +16,8 @@ defmt = { version = "0.3", optional = true }
 embassy-rp = { version = "0.1.0", path = "../embassy-rp" }
 embassy-time = { version = "0.1.2", path = "../embassy-time", features = ["nightly", "unstable-traits", "defmt", "defmt-timestamp-uptime"] }
 
+bitset-core = {version = "0.1.1", default-features = false}
+bit-set = {version = "0.5.3", default-features = false}
 fixed = "1.23.1"
 fixed-macro = "1.2"
 pio-proc = "0.2"

@@ -10,10 +10,11 @@ use core::str;
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
+use embassy_time::{Timer, Instant};
 use embassy_net::Stack;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_25, PIO0};
+use embassy_rp::gpio::{Level, Output, Input, Pull};
+use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_14, PIN_15, PIN_25, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -34,11 +35,40 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
     stack.run().await
 }
 
+#[embassy_executor::task]
+async fn capture_input_task(mut input: Input<'static, PIN_15>) -> ! {
+    let _init_instant = Instant::now();
+    loop {
+        input.wait_for_low().await;
+        let _instant_low = Instant::now();
+        //  TODO: put instant low into ring buffer queue
+        input.wait_for_low().await;
+        let _instant_high = Instant::now();
+        //  TODO: put instant high into ring buffer queue
+    }
+}
+#[embassy_executor::task]
+async fn generate_toggle_task(mut gpio: Output<'static, PIN_14>) -> ! {
+    loop {
+        gpio.set_high();
+        Timer::after_secs(1).await;
+        gpio.set_low();
+        Timer::after_secs(1).await;
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Hello World!");
 
     let p = embassy_rp::init(Default::default());
+    let mut led = Output::new(p.PIN_14, Level::Low);
+    let async_input = Input::new(p.PIN_15, Pull::Up);
+
+    info!("wait_for_high. Turn on LED");
+    led.set_high();
+    unwrap!(spawner.spawn(generate_toggle_task(led)));
+    unwrap!(spawner.spawn(capture_input_task(async_input)));
 
     let fw = include_bytes!("../../../../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../../../../cyw43-firmware/43439A0_clm.bin");
@@ -71,4 +101,6 @@ async fn main(spawner: Spawner) {
             info!("scanned {} == {:x}", ssid_str, bss.bssid);
         }
     }
+
+
 }

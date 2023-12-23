@@ -61,7 +61,7 @@ impl<const N:usize> RpEdgeCapture<N> {
         Self{}
     }
     //  TODO:
-    //  input pin,
+    //  done: input pin,
     //  max time in total
     //  max time in idle state
     //  consider resolution (wakeup to see if good level is still there)
@@ -103,8 +103,6 @@ impl<const N:usize> RpEdgeCapture<N> {
             count+=1;
         };
 
-        timestamps.push(234).unwrap();
-        timestamps.push(345).unwrap();
         Ok((init_state, timestamps))
     }
 }
@@ -202,7 +200,14 @@ async fn main(spawner: Spawner) {
     //  }
 
     let capture_device = RpEdgeCapture::<128>::new();
-    capture_device.start_capture(async_input);
+    match capture_device.start_capture(async_input).await {
+        Ok((_init_state, _vector)) => {
+            log::info!("got data");
+        }
+        Err(_) => {
+            log::info!("got err");
+        }
+    }
 
     loop {
         //  async_input.wait_for_low().await;

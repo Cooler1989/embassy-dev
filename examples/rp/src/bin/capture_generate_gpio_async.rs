@@ -8,17 +8,18 @@
 
 //  use core::str;
 
+mod manchester;
+
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_time::{Timer, Instant};
 use embassy_net::Stack;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output, Input, Pull};
-use embassy_rp::peripherals::USB;
-use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
-use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_14, PIN_15, PIN_25, PIO0};
+use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::peripherals::{DMA_CH0, PIN_14, PIN_15, PIN_23, PIN_25, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
+use embassy_time::{Instant, Timer, Duration};
 use heapless::Vec;
 use static_cell::make_static;
 use {defmt_rtt as _, panic_probe as _};
@@ -34,31 +35,28 @@ pub enum CaptureError {
     NotEnoughSpace,
 }
 
-trait EdgeCaptureInterface<const N:usize = 128>
-{
+trait EdgeCaptureInterface<const N: usize = 128> {
     //  TODO: specify /generically/ idle level or maybe better, return one captured:
     async fn start_capture() -> Result<(), CaptureError>;
 }
 
-struct RpEdgeCapture< const N:usize = 128> {
-}
+struct RpEdgeCapture<const N: usize = 128> {}
 
-#[derive(Clone)]
+#[derive(Clone,PartialEq)]
 pub enum InitLevel {
     Low,
-    High
+    High,
 }
 
 pub enum FinishState {
     IdleState,
     TimeoutReached,
-    CountReached
+    CountReached,
 }
 
-impl<const N:usize> RpEdgeCapture<N> {
-    fn new() -> Self
-    {
-        Self{}
+impl<const N: usize> RpEdgeCapture<N> {
+    fn new() -> Self {
+        Self {}
     }
     //  TODO:
     //  done: input pin,
@@ -68,40 +66,38 @@ impl<const N:usize> RpEdgeCapture<N> {
     //  return timestamp of start and end of the capture
     //  return status: FinishState ->
     //  add wait init state: low/high, how long
-    async fn start_capture(self, mut input_pin: Input<'static, PIN_15>) -> Result<(InitLevel, Vec<usize,N>), CaptureError>
-    {
+    async fn start_capture(
+        self,
+        mut input_pin: Input<'static, PIN_15>,
+    ) -> Result<(InitLevel, Vec<Duration, N>), CaptureError> {
         let start_timestamp = Instant::now();
         let init_state = match input_pin.is_high() {
-            true => {
-                InitLevel::High
-            },
-            false => {
-                InitLevel::Low
-            },
+            true => InitLevel::High,
+            false => InitLevel::Low,
         };
 
         let mut capture_timestamp = start_timestamp;
         let mut current_level = init_state.clone();
         let mut count: usize = 0;
-        let mut timestamps = Vec::<usize,N>::new();
+        let mut timestamps = Vec::<Duration, N>::new();
 
         while count < N {
             current_level = match current_level {
                 InitLevel::Low => {
                     input_pin.wait_for_high().await;
                     InitLevel::High
-                },
+                }
                 InitLevel::High => {
                     input_pin.wait_for_low().await;
                     InitLevel::Low
                 }
             };
             let temporary_timestamp = Instant::now();
-            let ms = temporary_timestamp.duration_since(capture_timestamp).as_ticks();
-            timestamps.push(ms as usize).unwrap();  //  here return error
+            let ms = temporary_timestamp.duration_since(capture_timestamp);
+            timestamps.push(ms).unwrap(); //  here return error
             capture_timestamp = temporary_timestamp;
-            count+=1;
-        };
+            count += 1;
+        }
 
         Ok((init_state, timestamps))
     }
@@ -154,14 +150,13 @@ async fn generate_toggle_task(mut gpio: Output<'static, PIN_14>) -> ! {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-
     let p = embassy_rp::init(Default::default());
     let driver = Driver::new(p.USB, Irqs);
     spawner.spawn(logger_task(driver)).unwrap();
     log::info!("Init at {}", Instant::now());
 
     let mut led = Output::new(p.PIN_14, Level::Low);
-    let mut async_input = Input::new(p.PIN_15, Pull::Up);
+    let async_input = Input::new(p.PIN_15, Pull::Up);
 
     log::info!("wait_for_high. Turn on LED");
     led.set_high();
@@ -221,7 +216,3 @@ async fn main(spawner: Spawner) {
     }
 }
 
-//  TODO: Write some tests
-//
-//  test decoder of the duration table into manchaster sync protocol (check in WIO project)
-//

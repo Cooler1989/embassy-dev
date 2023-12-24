@@ -11,12 +11,12 @@ use core::str;
 use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_time::{Timer, Instant};
 use embassy_net::Stack;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output, Input, Pull};
-use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_14, PIN_15, PIN_25, PIO0};
+use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::peripherals::{DMA_CH0, PIN_14, PIN_15, PIN_23, PIN_25, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_time::{Instant, Timer};
 use static_cell::make_static;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -101,6 +101,4 @@ async fn main(spawner: Spawner) {
             info!("scanned {} == {:x}", ssid_str, bss.bssid);
         }
     }
-
-
 }

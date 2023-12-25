@@ -19,8 +19,9 @@ use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH0, PIN_14, PIN_15, PIN_23, PIN_25, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
-use embassy_time::{Instant, Timer, Duration};
+use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec;
+use manchester::manchester_decode;
 use static_cell::make_static;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -42,7 +43,7 @@ trait EdgeCaptureInterface<const N: usize = 128> {
 
 struct RpEdgeCapture<const N: usize = 128> {}
 
-#[derive(Clone,PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum InitLevel {
     Low,
     High,
@@ -204,6 +205,16 @@ async fn main(spawner: Spawner) {
         }
     }
 
+    const VEC_SIZE_MANCHESTER: usize = 128usize;
+    let mut wire_state_periods = Vec::<Duration, VEC_SIZE_MANCHESTER>::new();
+    let now = Instant::now();
+    wire_state_periods.push(Instant::now().duration_since(now)).unwrap();
+    wire_state_periods.push(Instant::now().duration_since(now)).unwrap();
+    wire_state_periods.push(Instant::now().duration_since(now)).unwrap();
+
+    const MANCHESTER_PERIOD_US: usize = 500usize;
+    let _output = manchester_decode::<VEC_SIZE_MANCHESTER, MANCHESTER_PERIOD_US>(InitLevel::Low, wire_state_periods);
+
     loop {
         //  async_input.wait_for_low().await;
         control.gpio_set(0, true).await;
@@ -215,4 +226,3 @@ async fn main(spawner: Spawner) {
         log::info!("PIN_14 -> HIGH at {}", instant_high);
     }
 }
-

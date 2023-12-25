@@ -108,16 +108,46 @@ pub fn manchester_decode<
                 }
             };
             match output.push(new_level) {
-                Err(_returned_element) => {  //  returns back elemeent that was not possible
+                Err(_returned_element) => {
+                    //  returns back elemeent that was not possible
                     return Err(CodingError::NoSpaceAvailable);
-                },
-                _ => {  // correct
+                }
+                _ => { // correct
                 }
             }
         } else {
             //  Half way through the bit there is non-conforming period length:
             return Err(CodingError::PeriodEncondingError);
             //  TODO: check for number of elements in the queue that left
+        }
+    }
+    Ok(output)
+}
+
+pub fn manchester_encode<
+    const N: usize, /*Vec max size*/
+    const T: usize, /*period duration in us which specifies smalles amount of time the linee can state in one state*/
+>(
+    level: InitLevel,
+    mut input: Vec<bool, N>,
+) -> Result<Vec<bool, N>, CodingError> {
+    let mut output = Vec::<bool, N>::new();
+    while let Some(element) = input.pop() {
+        match output.push(element) {
+            Err(_returned_element) => {
+                //  returns back elemeent that was not possible
+                return Err(CodingError::NoSpaceAvailable);
+            }
+            _ => { // correct
+            }
+        }
+        match output.push(!element) {
+            Err(_returned_element) => {
+                //  returns back elemeent that was not possible
+                return Err(CodingError::NoSpaceAvailable);
+            }
+            _ => { // correct
+            }
         }
     }
     Ok(output)

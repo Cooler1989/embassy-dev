@@ -1,0 +1,26 @@
+[package]
+name = "embassy-opentherm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Handling OpenTherm communication"
+repository = "https://github.com/embassy-rs/embassy"
+categories = [
+  "embedded",
+  "no-std",
+  "asynchronous",
+]
+
+[dependencies]
+defmt = { version = "0.3", optional = true }
+embassy-rp = { version = "0.1.0", path = "../embassy-rp" }
+embassy-time = { version = "0.2.0", path = "../embassy-time", features = ["defmt", "defmt-timestamp-uptime"] }
+
+trait-variant = "0.1.0"
+bitset-core = {version = "0.1.1", default-features = false}
+bit-set = {version = "0.5.3", default-features = false}
+fixed = "1.23.1"
+fixed-macro = "1.2"
+pio-proc = "0.2"
+pio = "0.2.1"
+log = "0.4"

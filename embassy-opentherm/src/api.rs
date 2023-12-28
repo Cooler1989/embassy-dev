@@ -65,7 +65,7 @@ impl From<OpenThermMessageValue> for u16
 {
     fn from (item: OpenThermMessageValue) -> Self
     {
-        item.Value as u16
+        match item { OpenThermMessageValue::Value(x) => x as u16 }
     }
 }
 
@@ -73,8 +73,7 @@ impl From<OpenThermMessage> for u32
 {
     fn from (item: OpenThermMessage) -> Self
     {
-        //  item.data_value_ as u32
-        item.value_ as u32
+        match item.value_ { OpenThermMessageValue::Value(x) => x as u32 }
     }
 }
 
@@ -91,13 +90,14 @@ impl OpenThermMessage {
     }
     pub fn get_raw_data_value(self) -> u32 {
         // self.data_value_
-        into()
+        //  into()
+        self.data_id_ as u32
     }
 }
 
 impl fmt::LowerHex for OpenThermMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let val = self.data_value_;
+        let val = self.get_raw_data_value();
         fmt::LowerHex::fmt(&val, f)
     }
 }
@@ -105,7 +105,7 @@ impl fmt::LowerHex for OpenThermMessage {
 // #[derive(PartialEq,Debug)]
 impl core::fmt::Debug for OpenThermMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let val = self.data_value_;
+        let val = self.get_raw_data_value();
         fmt::LowerHex::fmt(&val, f)
         //  f.debug_struct("OtMsg").
         //      field("data", &self.data_value_).finish()

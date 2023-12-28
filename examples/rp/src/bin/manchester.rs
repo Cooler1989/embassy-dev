@@ -22,9 +22,7 @@ pub enum CodingError {
 //    bit.
 
 //  TODO: Prepare data first - remove first and last long periods
-pub fn manchester_decode<
-    const N: usize, /*Vec max size*/
->(
+pub fn manchester_decode<const N: usize /*Vec max size*/>(
     level: InitLevel,
     mut wire_state_periods: Vec<Duration, N>,
     resolution: Duration, /*period duration which specifies smalles amount of time the line can state in one state*/
@@ -50,14 +48,12 @@ pub fn manchester_decode<
     //  First half of initial 'one' bit:
     match wire_state_periods.pop() {
         Some(pop_period) => {
-            if (100 * pop_period < 95 * resolution)
-                || (100 * pop_period > 105 * resolution)
-            {
+            if (100 * pop_period < 95 * resolution) || (100 * pop_period > 105 * resolution) {
                 return Err(CodingError::PeriodEncodingError);
             }
-        },
+        }
         _ => {
-                return Err(CodingError::PeriodEncodingError);
+            return Err(CodingError::PeriodEncodingError);
         }
     }
     output.push(true).unwrap(); //  First 'one' bit
@@ -67,14 +63,13 @@ pub fn manchester_decode<
     //  in the middle of just determined bit.
     while let Some(pop_period) = wire_state_periods.pop() {
         //  Check if the period is of value around of the resolution:
-        if (100 * pop_period > 95 * resolution) && (100 * pop_period < 105 * resolution)
-        {
+        if (100 * pop_period > 95 * resolution) && (100 * pop_period < 105 * resolution) {
             let output_candidate = match level {
                 InitLevel::Low => {
-                    true  //  a one after one
+                    true //  a one after one
                 }
                 InitLevel::High => {
-                    false  //  a zero after zero
+                    false //  a zero after zero
                 }
             };
             //  strip complementary half-period part
@@ -96,10 +91,9 @@ pub fn manchester_decode<
                     } else if 100 * pop_period < 95 * resolution {
                         //  because we expect at least a finished cycle
                         return Err(CodingError::PeriodEncodingError);
-                    }
-                    else {
+                    } else {
                         //  else: the length is withing range -> push & continue
-                        output.push(output_candidate).unwrap();   //  handle error
+                        output.push(output_candidate).unwrap(); //  handle error
                     }
                 }
                 _ => {
@@ -110,9 +104,7 @@ pub fn manchester_decode<
         }
         //  Check if the period is of value around two times of the resolution:
         //  which also means that we already land in the middle of the next bit
-        else if (100 * pop_period > 195 * resolution)
-            && (100 * pop_period < 205 * resolution)
-        {
+        else if (100 * pop_period > 190 * resolution) && (100 * pop_period < 210 * resolution) {
             let (replace_level, new_level) = match level {
                 InitLevel::Low => {
                     (InitLevel::High, false) //  a zero after one
@@ -134,8 +126,7 @@ pub fn manchester_decode<
             //  TODO: check for number of elements in the queue that left
             if wire_state_periods.is_empty() {
                 break;
-            }
-            else {
+            } else {
                 //  Half way through the bit there is non-conforming period length:
                 return Err(CodingError::PeriodEncodingError);
             }

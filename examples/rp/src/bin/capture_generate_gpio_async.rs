@@ -41,7 +41,7 @@ pub enum CaptureError {
     NotEnoughSpace,
 }
 
-const MANCHESTER_RESOLUTION: Duration = Duration::from_millis(500u64);
+const MANCHESTER_RESOLUTION: Duration = Duration::from_micros(500u64);
 
 trait EdgeCaptureInterface<const N: usize = 128> {
     //  TODO: specify /generically/ idle level or maybe better, return one captured:
@@ -78,6 +78,7 @@ impl<const N: usize> RpEdgeCapture<N> {
         &self,
         input_pin: &mut Input<'static, PIN_15>,
         timeout_inactive_capture: Duration,
+        timeout_till_active_capture: Duration,
     ) -> Result<(InitLevel, Vec<Duration, N>), CaptureError> {
         let start_timestamp = Instant::now();
         let init_state = match input_pin.is_high() {
@@ -87,13 +88,16 @@ impl<const N: usize> RpEdgeCapture<N> {
 
         let mut capture_timestamp = start_timestamp;
         let mut current_level = init_state.clone();
-        let mut count: usize = 0;
         let mut timestamps = Vec::<Duration, N>::new();
 
-        log::info!("Start edge capture loop...");
-        while count < N {
+        //  log::info!("Start edge capture loop...");
+        while !timestamps.is_full() {
             //  pub async fn with_timeout<F: Future>(timeout: Duration, fut: F) -> Result<F::Output, TimeoutError> {
-            match embassy_time::with_timeout(timeout_inactive_capture, async {
+            let timeout = match timestamps.is_empty() {
+                true => timeout_till_active_capture,
+                false => timeout_inactive_capture,
+            };
+            match embassy_time::with_timeout(timeout, async {
                 current_level = match current_level {
                     InitLevel::Low => {
                         input_pin.wait_for_high().await;
@@ -107,21 +111,21 @@ impl<const N: usize> RpEdgeCapture<N> {
             })
             .await
             {
-                Ok(_) => {}, //  continue until
+                Ok(_) => {} //  continue until
                 Err(_) => {
-                    log::warn!("Capture timeout!");
+                    //  log::warn!("Capture timeout!");
                     //  put last timeouted value into the vector
-                    timestamps.insert(0, Instant::now().duration_since(capture_timestamp)).unwrap(); //  here handle error
+                    timestamps
+                        .insert(0, Instant::now().duration_since(capture_timestamp))
+                        .unwrap(); //  here handle error
                     break;
                 } //  TODO: check if the error was timeout
             }
 
-            //  log::info!("Got an edge count: {}", count);
             let temporary_timestamp = Instant::now();
             let ms = temporary_timestamp.duration_since(capture_timestamp);
             timestamps.insert(0, ms).unwrap(); //  here handle error
             capture_timestamp = temporary_timestamp;
-            count += 1;
         }
 
         Ok((init_state, timestamps))
@@ -152,8 +156,7 @@ async fn capture_input_task(mut async_input: Input<'static, PIN_15>) -> ! {
     let capture_device = RpEdgeCapture::<128>::new();
     loop {
         match capture_device
-            .start_capture(&mut async_input,
-                Duration::from_secs(5))  //  a timeout for active capture
+            .start_capture(&mut async_input, 10 * MANCHESTER_RESOLUTION, Duration::from_secs(20)) //  a timeout for active capture
             .await
         {
             Ok((init_state, vector)) => {
@@ -167,7 +170,7 @@ async fn capture_input_task(mut async_input: Input<'static, PIN_15>) -> ! {
                         for (i, item) in vec.iter().enumerate() {
                             log::info!("Decoded: data[{i}] = {item}");
                         }
-                    },
+                    }
                     Err(err) => {
                         log::error!("Decoding error: {:#?}", err);
                     }
@@ -226,9 +229,9 @@ async fn generate_toggle_task(mut gpio: Output<'static, PIN_14>) -> ! {
         log::info!("...");
     } // | 1 | 1 | 0 | 1 | 1 | 1 | 0 | 0 | 1 |
 } //_____|^|_|^|_._  .   |^|_|^|_._|^|_|^|^|_.___
-//_______|   |   |   |   |   |   |   |   |   |
-//  Vec::<bool, 128usize>::new();
-//  fn new(pins: [Output<'a, AnyPin>; 8]) -> Self {
+  //_______|   |   |   |   |   |   |   |   |   |
+  //  Vec::<bool, 128usize>::new();
+  //  fn new(pins: [Output<'a, AnyPin>; 8]) -> Self {
 
 async fn generate_manchester_output(
     gpio: &mut Output<'static, PIN_14>,
@@ -258,7 +261,7 @@ async fn main(spawner: Spawner) {
     log::info!("Init at {}", Instant::now());
 
     let mut gpio_output = Output::new(p.PIN_14, Level::Low);
-    gpio_output.set_low();  //  Initial idle state for open therm bus
+    gpio_output.set_low(); //  Initial idle state for open therm bus
     let async_input = Input::new(p.PIN_15, Pull::Up);
 
     unwrap!(spawner.spawn(capture_input_task(async_input)));

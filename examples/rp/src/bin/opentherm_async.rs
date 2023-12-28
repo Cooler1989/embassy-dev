@@ -3,8 +3,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
-#![feature(async_fn_in_trait)]
 
 use embassy_executor::Spawner;
 use embassy_opentherm::pio_opentherm::{OtError, PioOpenTherm};

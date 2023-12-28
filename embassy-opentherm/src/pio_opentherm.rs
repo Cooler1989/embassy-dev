@@ -2,7 +2,6 @@ use crate::api;
 
 use api::*;
 
-use embassy_rp::relocate::RelocatedProgram;
 use fixed_macro::types::U56F8;
 use fixed::traits::ToFixed;
 use embassy_time::{Duration, Timer};
@@ -60,10 +59,9 @@ fn setup_pio_task_opentherm_tx<'a, PIO: PioInstance, const SM: usize>(
         "#,
     );
 
-    let relocated = RelocatedProgram::new(&prg.program);
     let mut cfg = ConfigPio::default();
     let out_pin = pio.make_pio_pin(pin);
-    cfg.use_program(&pio.load_program(&relocated), &[&out_pin]);
+    cfg.use_program(&pio.load_program(&prg.program), &[&out_pin]);
     cfg.set_out_pins(&[]);
     cfg.set_set_pins(&[]);
     cfg.clock_divider = (U56F8!(125_000_000) / 140 / 100).to_fixed();
@@ -138,11 +136,10 @@ fn setup_pio_task_opentherm_rx<'a, PIO: PioInstance, const SM: usize>(
         "#,
     );
 
-    let relocated = RelocatedProgram::new(&prg.program);
     let mut cfg = ConfigPio::default();
     let in_pin = pio.make_pio_pin(pin);
     let out_pin = pio.make_pio_pin(pin_out);
-    cfg.use_program(&pio.load_program(&relocated), &[&out_pin]);
+    cfg.use_program(&pio.load_program(&prg.program), &[&out_pin]);
     cfg.set_jmp_pin(&in_pin);
     cfg.set_in_pins(&[&in_pin]);
     //  cfg.set_out_pins(&[&out_pin]);

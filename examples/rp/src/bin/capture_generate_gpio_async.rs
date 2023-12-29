@@ -14,8 +14,7 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::Stack;
 use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Input, Level, Output, Pull};
-//  use embassy_stm32::gpio::{AnyPin, Input, Level, Output, Pin, Pull, Speed};
+use embassy_rp::gpio::{Input, Level, Output, Pin, Pull};
 use embassy_rp::peripherals::{DMA_CH0, PIN_14, PIN_15, PIN_23, PIN_25, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
@@ -47,7 +46,9 @@ trait EdgeCaptureInterface<const N: usize = 128> {
     async fn start_capture_interface() -> Result<(), CaptureError>;
 }
 
-struct RpEdgeCapture<const N: usize = 128> {}
+struct RpEdgeCapture<'d, InPin: Pin, const N: usize = 128> {
+    input_pin: Input<'d, InPin>,
+}
 
 #[derive(Clone, PartialEq)]
 pub enum InitLevel {
@@ -61,9 +62,12 @@ pub enum FinishState {
     CountReached,
 }
 
-impl<const N: usize> RpEdgeCapture<N> {
-    fn new() -> Self {
-        Self {}
+impl<'d, InPin, const N: usize> RpEdgeCapture<'d, InPin, N>
+where
+    InPin: Pin,
+{
+    fn new(input_pin: Input<'d, InPin>) -> Self {
+        Self { input_pin }
     }
     //  TODO:
     //  done: input pin,
@@ -74,13 +78,13 @@ impl<const N: usize> RpEdgeCapture<N> {
     //  return status: FinishState -> / timeout on active capture, full buffer
     //  add wait init state: low/high, how long
     async fn start_capture(
-        &self,
-        input_pin: &mut Input<'static, PIN_15>,
+        &mut self,
+        //  input_pin: &mut Input<'static, PIN_15>,
         timeout_inactive_capture: Duration,
         timeout_till_active_capture: Duration,
     ) -> Result<(InitLevel, Vec<Duration, N>), CaptureError> {
         let start_timestamp = Instant::now();
-        let init_state = match input_pin.is_high() {
+        let init_state = match self.input_pin.is_high() {
             true => InitLevel::High,
             false => InitLevel::Low,
         };
@@ -99,11 +103,11 @@ impl<const N: usize> RpEdgeCapture<N> {
             match embassy_time::with_timeout(timeout, async {
                 current_level = match current_level {
                     InitLevel::Low => {
-                        input_pin.wait_for_high().await;
+                        self.input_pin.wait_for_high().await;
                         InitLevel::High
                     }
                     InitLevel::High => {
-                        input_pin.wait_for_low().await;
+                        self.input_pin.wait_for_low().await;
                         InitLevel::Low
                     }
                 };
@@ -149,13 +153,13 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn capture_input_task(mut async_input: Input<'static, PIN_15>) -> ! {
+async fn capture_input_task(async_input: Input<'static, PIN_15>) -> ! {
     let _init_instant = Instant::now();
     log::info!("Start capture device:");
-    let capture_device = RpEdgeCapture::<128>::new();
+    let mut capture_device = RpEdgeCapture::<'static, PIN_15, 128>::new(async_input);
     loop {
         match capture_device
-            .start_capture(&mut async_input, 10 * MANCHESTER_RESOLUTION, Duration::from_secs(20)) //  a timeout for active capture
+            .start_capture(10 * MANCHESTER_RESOLUTION, Duration::from_secs(20)) //  a timeout for active capture
             .await
         {
             Ok((init_state, vector)) => {

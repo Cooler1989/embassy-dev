@@ -6,7 +6,7 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::peripherals::{PIO0, USB};
-use embassy_rp::pio::{Common, Config, InterruptHandler, Pio, Irq as PioIrq, PioPin, ShiftDirection, StateMachine};
+use embassy_rp::pio::{Common, Config, InterruptHandler, Irq as PioIrq, Pio, PioPin, ShiftDirection, StateMachine};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_time::{Duration, Timer};
 use fixed::traits::ToFixed;

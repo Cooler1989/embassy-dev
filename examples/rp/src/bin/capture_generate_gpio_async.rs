@@ -8,6 +8,9 @@
 //  use core::str;
 
 mod manchester;
+mod opentherm_interface;
+mod boiler;
+mod boiler_simulation;
 
 use cyw43_pio::PioSpi;
 use defmt::*;
@@ -167,12 +170,22 @@ async fn capture_input_task(async_input: Input<'static, PIN_15>) -> ! {
                 for (i, item) in vector.iter().enumerate() {
                     log::info!("got vec[{}]: {}", i, item);
                 }
-                //  const MANCHESTER_PERIOD_US: usize = 500usize;
                 match manchester_decode(init_state, vector, MANCHESTER_RESOLUTION) {
                     Ok(vec) => {
                         for (i, item) in vec.iter().enumerate() {
                             log::info!("Decoded: data[{i}] = {item}");
                         }
+                        if vec[0] != true {
+                            log::error!("Decoding error: vec[0] is 'false'. Must be 'true'");
+                        }
+                        //  expecting start and stop bit already in the vector
+                        let folded = vec.iter().skip(1).enumerate().fold(0u32, |acc, (i, bit_state)| {
+                            let value = acc | (*bit_state as u32) << i;
+                            //log::info!("Acc: {acc}, bit_state: {bit_state}, i: {i}");
+                            value
+                        });
+                        log::info!("Folded OR: 0x{:x}", folded);
+                        //  now convert folded value into opentherm message.
                     }
                     Err(err) => {
                         log::error!("Decoding error: {:#?}", err);

@@ -1,7 +1,7 @@
-#![no_std]
-
-use crate::opentherm_interface::{OpenThermInterface, UptimeCounter, CommunicationState, Temperature, OpenThermMessageCode};
-use crate::opentherm_interface::{Error as OtError};
+use crate::opentherm_interface::Error as OtError;
+use crate::opentherm_interface::{
+    CommunicationState, OpenThermInterface, OpenThermMessageCode, Temperature, UptimeCounter,
+};
 
 const MIN_TEMPERATURE_SETPOINT: Temperature = Temperature::Celsius(16i16);
 const BOOST_TEMPERATURE_DEFAULT: Temperature = Temperature::Celsius(24i16);
@@ -26,7 +26,7 @@ struct BoilerControl<D: OpenThermInterface, T: UptimeCounter> {
 }
 
 enum BoilerStatus {
-    Uninitialized,  //  to be changed to type level programming
+    Uninitialized, //  to be changed to type level programming
     Idle,
     BurnerStart,
     BurnerModulation,
@@ -34,7 +34,8 @@ enum BoilerStatus {
 
 impl<D: OpenThermInterface, T: UptimeCounter> BoilerControl<D, T> {
     pub fn new(opentherm_device: D, timer: T) -> BoilerControl<D, T>
-        where D: OpenThermInterface,
+    where
+        D: OpenThermInterface,
     {
         //  read boiler versions ?
         //  read opentherm versions ?
@@ -51,53 +52,48 @@ impl<D: OpenThermInterface, T: UptimeCounter> BoilerControl<D, T> {
         }
     }
 
-    fn SetpointControl(&mut self)
-    {
-        let Temperature::Celsius(to_send) = match self.state{
+    fn set_point_control(&mut self) {
+        let Temperature::Celsius(to_send) = match self.state {
             BoilerStatus::Uninitialized => MIN_TEMPERATURE_SETPOINT,
             BoilerStatus::Idle | BoilerStatus::BurnerModulation => self.setpoint,
             BoilerStatus::BurnerStart => self.setpoint + self.boost_setpoint,
         };
 
-        self.device.write( OpenThermMessageCode::BoilerTemperature, to_send as u32);
+        self.device
+            .write(OpenThermMessageCode::BoilerTemperature, to_send as u32);
     }
 
-    fn StateTransition(&mut self)
-    {
+    fn state_transition(&mut self) {
         //  Check timer expirations and does maintain state transitions
         //  BoilerStatus::Idle->BurenerStart->BurnerModulation
     }
 
     // turn into await / use await driver for reading/writing OpenTherm Bus:
-    pub fn Process(&mut self)
-        -> Result<(), OtError>
-    {
-        self.StateTransition();  //  check timer expiration and realize
+    pub async fn process(&mut self) -> Result<(), OtError> {
+        self.state_transition(); //  check timer expiration and realize
                                  //  BoilerStatus::BurnerStart->BurnerModulation transition
         let new_state = match self.communication_state {
             CommunicationState::StatusExchange => {
-                self.device.write( OpenThermMessageCode::Status, 0x00 );
+                self.device.write(OpenThermMessageCode::Status, 0x00);
                 CommunicationState::Control
-            },
+            }
             CommunicationState::Control => {
-                self.SetpointControl();
+                self.set_point_control();
                 CommunicationState::Diagnostics
-            },
+            }
             CommunicationState::Diagnostics => {
-                if let Ok(value) = self.device.read( OpenThermMessageCode::BoilerTemperature )
-                {
-                    value;  //  compose diagnostics
+                if let Ok(value) = self.device.read(OpenThermMessageCode::BoilerTemperature).await {
+                    value; //  compose diagnostics
                 }
                 CommunicationState::StatusExchange
-            },
+            }
         };
         self.communication_state = new_state;
         Ok(())
     }
     //  Always or on demand / or combined?
     //  Read back value of setpoint for comparison
-    pub fn SetCoTemp(&mut self, setpoint: Temperature)
-    {
+    pub fn set_co_temp(&mut self, setpoint: Temperature) {
         self.setpoint = setpoint;
     }
 }

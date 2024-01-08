@@ -19,7 +19,7 @@ use embassy_executor::Spawner;
 use embassy_net::Stack;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pin, Pull};
-use embassy_rp::peripherals::{DMA_CH0, PIN_14, PIN_15, PIN_23, PIN_25, PIO0, USB};
+use embassy_rp::peripherals::{DMA_CH0, PIN_13, PIN_14, PIN_15, PIN_23, PIN_25, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_time::{Duration, Instant, Timer};
@@ -42,6 +42,11 @@ bind_interrupts!(struct Irqs {
 pub enum GenerateError {
     GenericError,
 }
+
+enum TriggerError {
+    GenericError,
+}
+
 pub enum CaptureError {
     GenericError,
     InvalidData,
@@ -64,6 +69,10 @@ pub enum FinishState {
     CountReached,
 }
 
+trait EdgeTriggerInterface {
+    async fn trigger<'a>( &mut self, iterator: impl Iterator<Item = &'a bool>) -> Result<(), TriggerError>;
+}
+
 trait EdgeCaptureInterface<const N: usize = 128> {
     //  TODO: specify /generically/ idle level or maybe better, return one captured:
     async fn start_capture(
@@ -73,19 +82,24 @@ trait EdgeCaptureInterface<const N: usize = 128> {
     ) -> Result<(InitLevel, Vec<Duration, N>), CaptureError>;
 }
 
-struct OpenThermBus<E: EdgeCaptureInterface> {
+struct OpenThermBus<E: EdgeCaptureInterface, T: EdgeTriggerInterface> {
     edge_capture_drv: E,
+    edge_trigger_drv: T,
+    idle_level: u8,
 }
 
-impl<E: EdgeCaptureInterface> OpenThermBus<E> {
-    fn new(edge_capture_driver: E) -> Self {
+impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermBus<E, T> {
+    //  TODO: introduce idle level parameter
+    fn new(edge_capture_driver: E, edge_trigger_driver: T) -> Self {
         Self {
             edge_capture_drv: edge_capture_driver,
+            edge_trigger_drv: edge_trigger_driver,
+            idle_level: 0x0_u8,
         }
     }
 }
 
-impl<E: EdgeCaptureInterface> OpenThermInterface for OpenThermBus<E> {
+impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for OpenThermBus<E, T> {
     async fn write(&mut self, cmd: OpenThermMessageCode, data: u32) -> Result<(), OtError> {
         Ok(())
     }
@@ -143,6 +157,47 @@ impl<E: EdgeCaptureInterface> OpenThermInterface for OpenThermBus<E> {
         Ok(0x00_u32)
     }
 }
+
+struct RpEdgeTrigger<'d, OutPin: Pin> {
+    output_pin: Output<'d, OutPin>,
+}
+
+impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin>{
+
+    async fn trigger<'a>( &mut self, iterator: impl Iterator<Item = &'a bool>) -> Result<(), TriggerError> {
+        let period = MANCHESTER_RESOLUTION;
+        self.output_pin.set_low(); //  generate idle state:
+        Timer::after(period).await;  //  await one period in idle state
+
+        for item in iterator {
+
+        // iterator.for_each( async move |item| {
+                    if *item == true {
+                        self.output_pin.set_high();
+                    } else {
+                        self.output_pin.set_low();
+                    }
+                    Timer::after(period).await;
+                    self.output_pin.toggle();
+                    Timer::after(period).await;
+        }
+        //  });
+
+        self.output_pin.set_low(); //  generate idle state after
+        Timer::after(period).await;  //  await one period in idle state
+        Ok(())
+    }
+}
+
+impl<'d, OutPin> RpEdgeTrigger<'d, OutPin>
+where
+    OutPin: Pin,
+{
+    fn new(output_pin: Output<'d, OutPin>) -> Self {
+        Self { output_pin }
+    }
+}
+
 
 struct RpEdgeCapture<'d, InPin: Pin, const N: usize = 128> {
     input_pin: Input<'d, InPin>,
@@ -242,13 +297,13 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn capture_input_task(async_input: Input<'static, PIN_15>) -> ! {
+async fn boiler_simulation_task(async_input: Input<'static, PIN_15>, async_output: Output<'static, PIN_13>) -> ! {
     let _init_instant = Instant::now();
     log::info!("Start capture device:");
-    //  let mut cap_dev = RpEdgeCapture::<'static, PIN_15, 128>::new(async_input);
     let mut capture_device = RpEdgeCapture::<'static, PIN_15, 128>::new(async_input);
+    let mut trigger_device = RpEdgeTrigger::<'static, PIN_13>::new(async_output);
 
-    let mut open_therm_bus = OpenThermBus::new(capture_device);
+    let mut open_therm_bus = OpenThermBus::new(capture_device, trigger_device);
 
     loop {
         //  async fn read(&mut self, cmd: OpenThermMessageCode) -> Result<u32, OtError> {
@@ -321,8 +376,9 @@ async fn main(spawner: Spawner) {
     let mut gpio_output = Output::new(p.PIN_14, Level::Low);
     gpio_output.set_low(); //  Initial idle state for open therm bus
     let async_input = Input::new(p.PIN_15, Pull::Up);
+    let async_output = Output::new(p.PIN_13, Level::Low);
 
-    unwrap!(spawner.spawn(capture_input_task(async_input)));
+    unwrap!(spawner.spawn(boiler_simulation_task(async_input, async_output)));
     unwrap!(spawner.spawn(generate_toggle_task(gpio_output)));
 
     log::info!("Both capture and generate started");

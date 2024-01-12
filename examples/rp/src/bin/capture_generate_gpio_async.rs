@@ -19,12 +19,13 @@ use embassy_executor::Spawner;
 use embassy_net::Stack;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pin, Pull};
-use embassy_rp::peripherals::{DMA_CH0, PIN_13, PIN_14, PIN_15, PIN_23, PIN_25, PIO0, USB};
+use embassy_rp::peripherals::{DMA_CH0, PIN_12, PIN_13, PIN_14, PIN_15, PIN_23, PIN_25, PIO0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec;
 use manchester::manchester_decode;
+use boiler_simulation::BoilerSimulation;
 use opentherm_interface::{Error as OtError, MessageType, OpenThermInterface, OpenThermMessage, OpenThermMessageCode};
 use opentherm_interface::{
     CAPTURE_OT_FRAME_PAYLOAD_SIZE, MESSAGE_DATA_ID_BIT_LEN, MESSAGE_DATA_VALUE_BIT_LEN, MESSAGE_TYPE_BIT_LEN,
@@ -53,7 +54,7 @@ pub enum CaptureError {
     NotEnoughSpace,
 }
 
-const MANCHESTER_RESOLUTION: Duration = Duration::from_micros(1000u64);
+const MANCHESTER_RESOLUTION: Duration = Duration::from_millis(5u64);
 
 const TOTAL_CAPTURE_OT_FRAME_SIZE: usize = 34usize;
 
@@ -70,7 +71,7 @@ pub enum FinishState {
 }
 
 trait EdgeTriggerInterface {
-    async fn trigger<'a>( &mut self, iterator: impl Iterator<Item = &'a bool>) -> Result<(), TriggerError>;
+    async fn trigger(&mut self, iterator: impl Iterator<Item = bool>) -> Result<(), TriggerError>;
 }
 
 trait EdgeCaptureInterface<const N: usize = 128> {
@@ -101,6 +102,15 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermBus<E, T> {
 
 impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for OpenThermBus<E, T> {
     async fn write(&mut self, cmd: OpenThermMessageCode, data: u32) -> Result<(), OtError> {
+        let msg = OpenThermMessage::new(0x0);
+        match msg {
+            Ok(msg) => {
+                self.edge_trigger_drv.trigger(msg.iter());
+            }
+            _ => {
+                ();
+            }
+        }
         Ok(())
     }
     async fn read(&mut self, cmd: OpenThermMessageCode) -> Result<u32, OtError> {
@@ -158,33 +168,55 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
     }
 }
 
+struct ManchesterIteratorAdapter<I: Iterator<Item = bool>> {
+    iterator: I,
+    next_bit: Option<bool>,
+}
+
+impl<I: Iterator<Item = bool>> Iterator for ManchesterIteratorAdapter<I> {
+    type Item = bool;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_bit {
+            None => match self.iterator.next() {
+                None => None,
+                Some(bit) => {
+                    self.next_bit = Some(bit);
+                    Some(!bit)
+                }
+            },
+            Some(bit) => {
+                self.next_bit = None;
+                Some(bit)
+            }
+        }
+    }
+}
+
 struct RpEdgeTrigger<'d, OutPin: Pin> {
     output_pin: Output<'d, OutPin>,
 }
 
-impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin>{
-
-    async fn trigger<'a>( &mut self, iterator: impl Iterator<Item = &'a bool>) -> Result<(), TriggerError> {
+impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin> {
+    async fn trigger(&mut self, iterator: impl Iterator<Item = bool>) -> Result<(), TriggerError> {
         let period = MANCHESTER_RESOLUTION;
         self.output_pin.set_low(); //  generate idle state:
-        Timer::after(period).await;  //  await one period in idle state
+        Timer::after(period).await; //  await one period in idle state
 
         for item in iterator {
-
-        // iterator.for_each( async move |item| {
-                    if *item == true {
-                        self.output_pin.set_high();
-                    } else {
-                        self.output_pin.set_low();
-                    }
-                    Timer::after(period).await;
-                    self.output_pin.toggle();
-                    Timer::after(period).await;
+            // iterator.for_each( async move |item| {
+            if item == true {
+                self.output_pin.set_high();
+            } else {
+                self.output_pin.set_low();
+            }
+            Timer::after(period).await;
+            self.output_pin.toggle();
+            Timer::after(period).await;
         }
         //  });
 
         self.output_pin.set_low(); //  generate idle state after
-        Timer::after(period).await;  //  await one period in idle state
+        Timer::after(period).await; //  await one period in idle state
         Ok(())
     }
 }
@@ -197,7 +229,6 @@ where
         Self { output_pin }
     }
 }
-
 
 struct RpEdgeCapture<'d, InPin: Pin, const N: usize = 128> {
     input_pin: Input<'d, InPin>,
@@ -300,47 +331,83 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
 async fn boiler_simulation_task(async_input: Input<'static, PIN_15>, async_output: Output<'static, PIN_13>) -> ! {
     let _init_instant = Instant::now();
     log::info!("Start capture device:");
-    let mut capture_device = RpEdgeCapture::<'static, PIN_15, 128>::new(async_input);
-    let mut trigger_device = RpEdgeTrigger::<'static, PIN_13>::new(async_output);
+    let mut capture_device = RpEdgeCapture::new(async_input);
+    let mut trigger_device = RpEdgeTrigger::new(async_output);
 
     let mut open_therm_bus = OpenThermBus::new(capture_device, trigger_device);
+    let boiler_controller = BoilerSimulation::new();
 
     loop {
         //  async fn read(&mut self, cmd: OpenThermMessageCode) -> Result<u32, OtError> {
-        match open_therm_bus.read(OpenThermMessageCode::Status).await {
-            Ok(read_value) => log::info!("OpenThermBus.read() = {read_value}"),
-            Err(_) => log::error!("Error: OpenThermBus.read()"),
+        let response = match open_therm_bus.read(OpenThermMessageCode::Status).await {
+            Ok(read_value) => {
+                log::info!("OpenThermBus.read() = {read_value}");
+                let (cmd, ret) = boiler_controller.process(OpenThermMessageCode::Status, 0x00_u32).unwrap();
+                Some((cmd, ret))
+            }
+            Err(_) => {
+                log::error!("Error: OpenThermBus.read()");
+                None
+            }
+        };
+        match response {
+            Some((cmd, response)) => {
+                open_therm_bus
+                    .write(cmd, response)
+                    .await
+                    .unwrap();
+                },
+            None => {
+                ();
+            }
         }
     }
 }
 
 #[embassy_executor::task]
-async fn generate_toggle_task(mut gpio: Output<'static, PIN_14>) -> ! {
+async fn boiler_controller_task(async_input: Input<'static, PIN_12>, mut async_output: Output<'static, PIN_14>) -> ! {
     //  const PERIOD_GENERATE_SEC: usize = 1
-    let period = MANCHESTER_RESOLUTION;
-    let generate_pattern = 0x10255432_u32;
-    let mut generate_output_data = Vec::<bool, 128usize>::new();
-    generate_output_data.push(true).unwrap(); // start bit
-    for i in 0..(8usize * mem::size_of_val(&generate_pattern)) {
-        let bool_bit = ((0x1 << i) & generate_pattern) != 0x0;
-        generate_output_data.push(bool_bit).unwrap();
-    }
-    generate_output_data.push(true).unwrap(); //  stop bit
+    let mut capture_device = RpEdgeCapture::new(async_input);
+    let mut trigger_device = RpEdgeTrigger::new(async_output);
+
+    let mut open_therm_bus = OpenThermBus::new(capture_device, trigger_device);
+
     loop {
-        log::info!("Start generating output data");
-        gpio.set_low(); //  generate idle state:
-        Timer::after_secs(3).await;
-        log::info!("Generate continue generation at {}", Instant::now());
-        generate_manchester_output(&mut gpio, &generate_output_data, period)
+        open_therm_bus
+            .write(OpenThermMessageCode::Status, 0x00_u32)
             .await
             .unwrap();
+        Timer::after_millis(50).await;
+        match open_therm_bus.read(OpenThermMessageCode::Status).await {
+            Ok(read_value) => log::info!("OpenThermBus.read() = {read_value}"),
+            Err(_) => log::error!("Error: OpenThermBus.read()"),
+        }
+    }
+    //  let period = MANCHESTER_RESOLUTION;
+    //  let generate_pattern = 0x10255432_u32;
 
-        gpio.set_low(); //  generate idle state after
+    //  let mut generate_output_data = Vec::<bool, 128usize>::new();
+    //  generate_output_data.push(true).unwrap(); // start bit
+    //  for i in 0..(8usize * mem::size_of_val(&generate_pattern)) {
+    //      let bool_bit = ((0x1 << i) & generate_pattern) != 0x0;
+    //      generate_output_data.push(bool_bit).unwrap();
+    //  }
+    //  generate_output_data.push(true).unwrap(); //  stop bit
+    //  loop {
+    //      log::info!("Start generating output data");
+    //      async_output.set_low(); //  generate idle state:
+    //      Timer::after_secs(3).await;
+    //      log::info!("Generate continue generation at {}", Instant::now());
+    //      generate_manchester_output(&mut async_output, &generate_output_data, period)
+    //          .await
+    //          .unwrap();
 
-        log::info!("Generate wait start at {}", Instant::now());
-        Timer::after_secs(10).await;
-        log::info!("...");
-    } // | 1 | 1 | 0 | 1 | 1 | 1 | 0 | 0 | 1 |
+    //      async_output.set_low(); //  generate idle state after
+
+    //      log::info!("Generate wait start at {}", Instant::now());
+    //      Timer::after_secs(10).await;
+    //      log::info!("...");
+    //  } // | 1 | 1 | 0 | 1 | 1 | 1 | 0 | 0 | 1 |
 } //_____|^|_|^|_._  .   |^|_|^|_._|^|_|^|^|_.___
   //_______|   |   |   |   |   |   |   |   |   |
   //  Vec::<bool, 128usize>::new();
@@ -374,12 +441,13 @@ async fn main(spawner: Spawner) {
     log::info!("Init at {}", Instant::now());
 
     let mut gpio_output = Output::new(p.PIN_14, Level::Low);
+    let gpio_input = Input::new(p.PIN_12, Pull::Up);
     gpio_output.set_low(); //  Initial idle state for open therm bus
     let async_input = Input::new(p.PIN_15, Pull::Up);
     let async_output = Output::new(p.PIN_13, Level::Low);
 
     unwrap!(spawner.spawn(boiler_simulation_task(async_input, async_output)));
-    unwrap!(spawner.spawn(generate_toggle_task(gpio_output)));
+    unwrap!(spawner.spawn(boiler_controller_task(gpio_input, gpio_output)));
 
     log::info!("Both capture and generate started");
 

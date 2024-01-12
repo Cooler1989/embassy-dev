@@ -4,10 +4,32 @@ use crate::opentherm_interface::{
     UptimeCounter,
 };
 
-struct BoilerSimulation {
+pub struct BoilerSimulation {
     //  struct for testing operation of the driver used for boiler control
     boiler_temperature: Temperature,
     setpoint: Temperature,
+}
+
+impl BoilerSimulation {
+    pub fn new() -> Self {
+        Self {
+            boiler_temperature: Temperature::Celsius(18),
+            setpoint: Temperature::Celsius(16),
+        }
+    }
+    //  accepts OpenTherm message
+    //  returns the one that would be sent in response by the Boiler
+    pub fn process(&self, cmd: OpenThermMessageCode, value: u32) -> Result<(OpenThermMessageCode, u32), OtError>
+    {
+        match cmd {
+            OpenThermMessageCode::Status => {
+                Ok((OpenThermMessageCode::Status, 0x0_u32))
+            },
+            _ => {
+                return Err(OtError::CommandNotSupported);
+            }
+        }
+    }
 }
 
 impl OpenThermInterface for BoilerSimulation {

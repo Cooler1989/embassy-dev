@@ -13,11 +13,11 @@ use core::ops::Add;
 //  TODO:
 //  - Still: detect burner start transition based on mapped OpenTherm responses
 
-pub const CAPTURE_OT_FRAME_PAYLOAD_SIZE: usize = 32usize;
-pub const MESSAGE_DATA_VALUE_BIT_LEN: usize = 16usize;
-pub const MESSAGE_DATA_ID_BIT_LEN: usize = 8usize;
-pub const MESSAGE_TYPE_BIT_LEN: usize = 3usize;
-pub const OT_FRAME_SKIP_SPARE: usize = 4usize;
+pub const CAPTURE_OT_FRAME_PAYLOAD_SIZE: usize = 32_usize;
+pub const MESSAGE_DATA_VALUE_BIT_LEN: usize = 16_usize;
+pub const MESSAGE_DATA_ID_BIT_LEN: usize = 8_usize;
+pub const MESSAGE_TYPE_BIT_LEN: usize = 3_usize;
+pub const OT_FRAME_SKIP_SPARE: usize = 4_usize;
 
 #[derive(Debug)]
 pub enum Error {
@@ -28,9 +28,11 @@ pub enum Error {
     InvalidLength,
     DecodingError,
     ParityError,
+    CommandNotSupported,
 }
 
 #[repr(u8)]
+#[derive(Clone, Copy)]
 pub enum MessageType {
     //  master to slave messages
     ReadData = 0x0,
@@ -73,6 +75,7 @@ pub trait UptimeCounter {
 }
 
 #[repr(u8)]
+#[derive(Copy, Clone)]
 pub enum OpenThermMessageCode {
     Status = 0x00,
     TSet = 0x01,
@@ -113,7 +116,74 @@ pub struct OpenThermMessage {
     data_id: DataId,
 }
 
+//  TODO: Implement iterator: https://dev.to/wrongbyte/implementing-iterator-and-intoiterator-in-rust-3nio
+//?
+enum OpenThermIteratorState {
+    StartBit,
+    MessageType3b(u8),
+    Spare4b(u8),
+    DataId8b(u8),
+    DataValue16b(u8),
+    StopBit,
+    Depleted,
+}
+
+pub struct OpenThermMessageIterator<'a> {
+    message: &'a OpenThermMessage,
+    state: OpenThermIteratorState,
+}
+
+impl<'a> Iterator for OpenThermMessageIterator<'a> {
+    type Item = bool;
+    fn next(&mut self) -> Option<Self::Item> {
+        let (new_state, return_value) = match self.state {
+            OpenThermIteratorState::StartBit => (OpenThermIteratorState::MessageType3b(0), Some(true)),
+            OpenThermIteratorState::MessageType3b(shift) => {
+                let value = 0_u8 != (self.message.msg_type as u8) & (0x1_u8 << shift);
+                if shift >= MESSAGE_TYPE_BIT_LEN as u8 - 1 {
+                    (OpenThermIteratorState::Spare4b(0), Some(value))
+                } else {
+                    (OpenThermIteratorState::MessageType3b(shift + 1), Some(value))
+                }
+            }
+            OpenThermIteratorState::Spare4b(shift) => {
+                if shift >= OT_FRAME_SKIP_SPARE as u8 - 1 {
+                    (OpenThermIteratorState::StopBit, Some(false))
+                } else {
+                    (OpenThermIteratorState::Spare4b(shift + 1), Some(false))
+                }
+            }
+            OpenThermIteratorState::DataId8b(shift) => {
+                let value = 0_u8 != (self.message.cmd as u8) & (0x1_u8 << shift);
+                if shift >= MESSAGE_DATA_ID_BIT_LEN as u8 - 1 {
+                    (OpenThermIteratorState::DataValue16b(0), Some(value))
+                } else {
+                    (OpenThermIteratorState::DataId8b(shift + 1), Some(value))
+                }
+            }
+            OpenThermIteratorState::DataValue16b(shift) => {
+                let value = 0_u16 != (self.message.data_value as u16) & (0x1_u16 << shift);
+                if shift >= MESSAGE_DATA_VALUE_BIT_LEN as u8 - 1 {
+                    (OpenThermIteratorState::StopBit, Some(false))
+                } else {
+                    (OpenThermIteratorState::DataValue16b(shift + 1), Some(value))
+                }
+            }
+            OpenThermIteratorState::StopBit => (OpenThermIteratorState::Depleted, Some(true)),
+            _ => (OpenThermIteratorState::Depleted, None),
+        };
+        self.state = new_state;
+        return_value
+    }
+}
+
 impl OpenThermMessage {
+    pub fn iter(&self) -> OpenThermMessageIterator {
+        OpenThermMessageIterator {
+            message: self,
+            state: OpenThermIteratorState::StartBit,
+        }
+    }
     pub fn new_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Self, Error> {
         let folded =
             iterator

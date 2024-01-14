@@ -56,7 +56,7 @@ pub enum CaptureError {
     NotEnoughSpace,
 }
 
-const MANCHESTER_RESOLUTION: Duration = Duration::from_millis(5u64);
+const MANCHESTER_RESOLUTION: Duration = Duration::from_millis(10u64);
 
 const TOTAL_CAPTURE_OT_FRAME_SIZE: usize = 34usize;
 
@@ -99,6 +99,35 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermBus<E, T> {
             edge_trigger_drv: edge_trigger_driver,
             idle_level: 0x0_u8,
         }
+    }
+
+    async fn transact(&mut self, message_type: MessageType, cmd: DataOt) -> Result<DataOt, OtError> {
+        let msg = OpenThermMessage::new_from_data_ot(message_type, cmd);
+        let result = match msg {
+            Ok(msg) => {
+                //  let mut count = 0u32;
+                //  for item in msg.iter() {
+                //      count += 1u32;
+                //      //  log::info!("msg[{count}] = {}", item as bool);
+                //  }
+
+                let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
+                match self.edge_trigger_drv.trigger(manchester_adapter).await {
+                    Ok(()) => {  //  Successful send:
+                                 //  read and return value or error as it is
+                        self.listen().await  //  await response
+                    }
+                    Err(error) => {
+                        log::error!("Trigger error!");
+                        return Err(OtError::BusError);
+                    }
+                }
+            }
+            _ => {
+                return Err(OtError::DecodingError);
+            }
+        };
+        result
     }
 }
 
@@ -161,66 +190,11 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
     }
 
     async fn write(&mut self, cmd: DataOt) -> Result<(), OtError> {
-        let msg = OpenThermMessage::new_from_data_ot(MessageType::WriteData, cmd);
-        match msg {
-            Ok(msg) => {
-                let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
-                self.edge_trigger_drv.trigger(manchester_adapter).await;
-            }
-            _ => {
-                return Err(OtError::DecodingError);
-            }
-        }
+        let _ = self.transact(MessageType::WriteData, cmd).await?;
         Ok(())
     }
     async fn read(&mut self, cmd: DataOt) -> Result<DataOt, OtError> {
-        let msg = OpenThermMessage::new_from_data_ot(MessageType::ReadData, cmd);
-
-        //  let mut count = 0u32;
-        //  let iterator = msg.iter();
-        //  let (folded, count) =
-        //      iterator
-        //          .clone()
-        //          .take(CAPTURE_OT_FRAME_PAYLOAD_SIZE)
-        //          .enumerate()
-        //          .fold((0_u64, 0_u32), |(acc, count), (i, &bit_state)| {
-        //              let bit: u64 = match *bit_state {
-        //                  true => 1_u64,
-        //                  false => 0_u64,
-        //              };
-        //              let value = acc | (bit << i);
-        //              count += 1_u32;
-        //              (value, count)
-        //          });
-        //  log::info!("Folded OR: 0x{:x}", folded);
-        //  log::info!("Edge Trigger count: {count}");
-
-
-        let result = match msg {
-            Ok(msg) => {
-                let mut count = 0u32;
-                for item in msg.iter() {
-                    count += 1u32;
-                    log::info!("msg[{count}] = {}", item as bool);
-                }
-
-                let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
-                match self.edge_trigger_drv.trigger(manchester_adapter).await {
-                    Ok(()) => {  //  Successful send:
-                        //  read and return value or error as it is
-                        self.listen().await
-                    }
-                    Err(error) => {
-                        log::error!("Trigger error!");
-                        return Err(OtError::BusError);
-                    }
-                }
-            }
-            _ => {
-                return Err(OtError::DecodingError);
-            }
-        };
-        result
+        self.transact(MessageType::ReadData, cmd).await
     }
 }
 

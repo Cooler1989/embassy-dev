@@ -24,11 +24,13 @@ pub enum Error {
     GenericError,
     InvalidData,
     UnknownDataId,
+    BusError,
     InvalidStart,
     InvalidLength,
     DecodingError,
     ParityError,
     CommandNotSupported,
+    UnexpectedResult,
 }
 
 #[repr(u8)]
@@ -70,22 +72,153 @@ impl TryFrom<u8> for MessageType {
 trait OpenThermReadRequest {}
 trait OpenThermWriteRequest {}
 
-pub trait UptimeCounter {
-    fn get_uptime_sec(&self) -> u32;
+#[derive(Copy, Clone)]
+pub enum CHState {
+    Enable(bool),
+}
+
+impl Default for CHState {
+    fn default() -> Self {
+        CHState::Enable(false)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum Fault {
+    Value(bool),
+}
+
+impl Default for Fault {
+    fn default() -> Self {
+        Fault::Value(false)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum DWHState {
+    Enable(bool),
+}
+
+impl Default for DWHState {
+    fn default() -> Self {
+        DWHState::Enable(false)
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum FlameState {
+    Active(bool)
+}
+
+impl Default for FlameState {
+    fn default() -> Self {
+        FlameState::Active(false)
+    }
+}
+
+enum Flag8 {
+    value(u8),
+}
+
+impl From<MasterStatus> for Flag8 {
+    fn from(item: MasterStatus) -> Self {
+        let mut result: u8 = 0_u8;
+        //  let ChEnable(item.ch_state) {
+        match item.ch_enable {
+            CHState::Enable(boolean) => {
+                result |= (boolean as u8) << 0x0;
+            }
+        }
+        Flag8::value(result)
+    }
+}
+
+//  Data types:
+//  f8.8  signed fixed point value : 1 sign bit, 7 integer bit, 8 fractional bits (two’s compliment ie. the
+//  LSB of the 16bit binary number represents 1/256th of a unit).
+enum Float8_8 {
+    Signed(i8),
+    //  TODO:
+    //  fractional(u8),
+}
+
+impl From<Float8_8> for Temperature {
+    fn from(item: Float8_8) -> Self {
+        todo!();
+    }
+}
+
+// implement From / to flag8
+#[derive(Default)]
+pub struct MasterStatus {
+    pub ch_enable: CHState,
+    pub dwh_enable: DWHState,
+}
+
+impl MasterStatus {
+    fn new_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Self, Error> {
+        let mut iterator = iterator;
+        let ch_state = iterator.next().unwrap();
+        let dwh_state = iterator.next().unwrap();
+        Ok(Self {
+            ch_enable: CHState::Enable(*ch_state),
+            dwh_enable: DWHState::Enable(*dwh_state),
+        })
+    }
+    pub fn new(ch: CHState, dwh: DWHState) -> Self {
+        Self {
+            ch_enable: ch,
+            dwh_enable: dwh,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct SlaveStatus {
+    fault: Fault,
+    ch_active: CHState,
+    dwh_active: DWHState,
+    flame_active: FlameState,
+}
+
+impl SlaveStatus {
+    fn new_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Self, Error> {
+        let mut iterator = iterator;
+        let fault_indication = iterator.next().unwrap();
+        let ch_state = iterator.next().unwrap();
+        let dwh_state = iterator.next().unwrap();
+        let flame_active = iterator.next().unwrap();
+        Ok(Self {
+            fault: Fault::Value(*fault_indication),
+            ch_active: CHState::Enable(*ch_state),
+            dwh_active: DWHState::Enable(*dwh_state),
+            flame_active: FlameState::Active(*flame_active),
+        })
+    }
+    pub fn new(ch_state: CHState, dwh_state: DWHState, flame: FlameState) -> Self {
+        Self {
+            fault: Fault::Value(false),
+            ch_active: ch_state,
+            dwh_active: dwh_state,
+            flame_active: flame,
+        }
+    }
 }
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
 pub enum OpenThermMessageCode {
     Status = 0x00,
-    TSet = 0x01,
+    ControlSetpoint = 0x01,
     BoilerTemperature = 0x25,
+    Unrecognized = 0xFF,
 }
 
-pub enum DataId {
-    Status(u8),
-    Tset(u16),
-    BoilerTemperature(u16),
+pub enum DataOt {
+    MasterStatus(MasterStatus), //  for write
+    SlaveStatus(SlaveStatus),   //  for read
+    ControlSetpoint(Temperature),
+    BoilerTemperature(Temperature),
 }
 
 impl TryFrom<u8> for OpenThermMessageCode {
@@ -93,7 +226,7 @@ impl TryFrom<u8> for OpenThermMessageCode {
     fn try_from(item: u8) -> Result<Self, Self::Error> {
         match item {
             0x00 => Ok(OpenThermMessageCode::Status),
-            0x01 => Ok(OpenThermMessageCode::TSet),
+            0x01 => Ok(OpenThermMessageCode::ControlSetpoint),
             0x25 => Ok(OpenThermMessageCode::BoilerTemperature),
             _ => Err(()),
         }
@@ -113,7 +246,7 @@ pub struct OpenThermMessage {
     data_value: u16,
     //  stop bit
     cmd: OpenThermMessageCode,
-    data_id: DataId,
+    data_id: DataOt,
 }
 
 //  TODO: Implement iterator: https://dev.to/wrongbyte/implementing-iterator-and-intoiterator-in-rust-3nio
@@ -184,6 +317,19 @@ impl OpenThermMessage {
             state: OpenThermIteratorState::StartBit,
         }
     }
+    fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {
+        let sign = iterator.clone().next().unwrap();
+        let data_value = iterator.skip(1).enumerate().fold(0i8, |acc, (i, &bit_state)| {
+            let value = acc | ((bit_state as i8) << i);
+            value
+        });
+        //  return:
+        match *sign {
+            true => Ok(Float8_8::Signed(-1i8 * data_value)),
+            false => Ok(Float8_8::Signed(data_value)),
+        }
+    }
+
     pub fn new_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Self, Error> {
         let folded =
             iterator
@@ -192,7 +338,6 @@ impl OpenThermMessage {
                 .enumerate()
                 .fold(0_u32, |acc, (i, &bit_state)| {
                     let value = acc | ((bit_state as u32) << i);
-                    //  log::info!("Acc: 0x{:x}, b:{bit_state}, i: {i}", acc);
                     value
                 });
         log::info!("Folded OR: 0x{:x}", folded);
@@ -202,16 +347,15 @@ impl OpenThermMessage {
             return Err(Error::ParityError);
         }
 
-        let data_value =
-            iterator
-                .clone()
-                .take(MESSAGE_DATA_VALUE_BIT_LEN)
-                .enumerate()
-                .fold(0u16, |acc, (i, &bit_state)| {
-                    let value = acc | ((bit_state as u16) << i);
-                    //  log::info!("DataId decoding v[{i}] = {} => 0b{:b}", bit_state, value);
-                    value
-                });
+        let data_value_iterator = iterator.clone().take(MESSAGE_DATA_VALUE_BIT_LEN);
+        let data_float8_8 = Self::float8_8_from_iter(data_value_iterator.clone()).unwrap();
+        let data_value = data_value_iterator
+            .clone()
+            .enumerate()
+            .fold(0u16, |acc, (i, &bit_state)| {
+                let value = acc | ((bit_state as u16) << i);
+                value
+            });
         log::info!("DataValue = 0x{:x}", data_value);
 
         let iter = iterator.skip(MESSAGE_DATA_VALUE_BIT_LEN);
@@ -232,20 +376,12 @@ impl OpenThermMessage {
                 return Err(Error::DecodingError);
             }
         };
-
-        let data_id = match data_id {
-            OpenThermMessageCode::Status => DataId::Status(data_value as u8),
-            OpenThermMessageCode::TSet => DataId::Tset(data_value as u16), // f8.8 TODO: use u32
-            // to map float
-            OpenThermMessageCode::BoilerTemperature => DataId::BoilerTemperature(data_value),
-        };
-
         let iter = iter.skip(MESSAGE_DATA_ID_BIT_LEN + OT_FRAME_SKIP_SPARE);
 
         let msg_type = iter
             .clone()
-            .enumerate()
             .take(MESSAGE_TYPE_BIT_LEN)
+            .enumerate()
             .clone()
             .fold(0u8, |acc, (i, bit_state)| {
                 let value = acc | (*bit_state as u8) << i;
@@ -264,18 +400,43 @@ impl OpenThermMessage {
         let mut iter = iter.skip(MESSAGE_TYPE_BIT_LEN);
         let parity = iter.next();
 
+        //  Deconding based on other types
+        let data_id = match data_id {
+            OpenThermMessageCode::Status => match msg_type {
+                MessageType::ReadAck => {
+                    todo!();
+                    DataOt::SlaveStatus(SlaveStatus::new_from_iter(data_value_iterator)?)
+                }
+                MessageType::ReadData => {
+                    todo!();
+                    DataOt::MasterStatus(Default::default())
+                }
+                _ => {
+                    return Err(Error::DecodingError);
+                }
+            },
+            //  fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {
+            OpenThermMessageCode::ControlSetpoint => DataOt::ControlSetpoint(data_float8_8.into()), // f8.8 TODO: use u3
+            // to map float
+            OpenThermMessageCode::BoilerTemperature => DataOt::BoilerTemperature(data_float8_8.into()),
+            _ => {
+                log::error!("Unrecognized DataId");
+                return Err(Error::UnknownDataId);
+            }
+        };
+
         Ok(Self {
-            msg_type: MessageType::UnknownDataId,
-            data_id: DataId::Status(0x00),
+            msg_type: msg_type,
+            data_id: DataOt::MasterStatus(Default::default()),
             data_value: 0x00,
             cmd: OpenThermMessageCode::Status,
         })
     }
 
-    pub fn new(raw_value: u32) -> Result<Self, Error> {
+    pub fn new_from_data_ot(cmd_type: MessageType, data_ot: DataOt) -> Result<Self, Error> {
         Ok(Self {
-            msg_type: MessageType::UnknownDataId,
-            data_id: DataId::Status(0x00),
+            msg_type: cmd_type,
+            data_id: data_ot,
             data_value: 0x00,
             cmd: OpenThermMessageCode::Status,
         })
@@ -283,9 +444,10 @@ impl OpenThermMessage {
 }
 
 pub trait OpenThermInterface {
-    async fn write(&mut self, cmd: OpenThermMessageCode, data: u32) -> Result<(), Error>;
+    async fn write(&mut self, cmd: DataOt) -> Result<(), Error>;
     //  read need more parameters: timeout, number of expected bits etc
-    async fn read(&mut self, cmd: OpenThermMessageCode) -> Result<u32, Error>;
+    async fn read(&mut self, cmd: DataOt) -> Result<DataOt, Error>;
+    async fn listen(&mut self) -> Result<DataOt, Error>;
 }
 
 pub enum CommunicationState {
@@ -298,6 +460,12 @@ pub enum CommunicationState {
 #[derive(PartialEq, PartialOrd, Clone, Copy, Debug)]
 pub enum Temperature {
     Celsius(i16),
+}
+
+impl Default for Temperature {
+    fn default() -> Self {
+        Temperature::Celsius(0_i16)
+    }
 }
 
 impl Add for Temperature {

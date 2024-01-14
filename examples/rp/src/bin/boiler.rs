@@ -1,7 +1,5 @@
 use crate::opentherm_interface::Error as OtError;
-use crate::opentherm_interface::{
-    CommunicationState, OpenThermInterface, OpenThermMessageCode, Temperature, UptimeCounter,
-};
+use crate::opentherm_interface::{CommunicationState, OpenThermInterface, OpenThermMessageCode, Temperature, DataOt, CHState, DWHState, MasterStatus};
 
 const MIN_TEMPERATURE_SETPOINT: Temperature = Temperature::Celsius(16i16);
 const BOOST_TEMPERATURE_DEFAULT: Temperature = Temperature::Celsius(24i16);
@@ -15,14 +13,14 @@ const BURNER_STOP_HIGH_TRESHOLD: Temperature = Temperature::Celsius(8i16);
 //  boiler producer made a faulty product that is not able to push the heat produced at start of
 //  the burner due to high power used at that phase which is around 70-75%
 //  After around 15 seconds power can be modulated to lower values and can operate on its own.
-struct BoilerControl<D: OpenThermInterface, T: UptimeCounter> {
+pub struct BoilerControl<D: OpenThermInterface> {
     state: BoilerStatus,
     communication_state: CommunicationState,
     device: D,
     boost_setpoint: Temperature,
     setpoint: Temperature,
-    timer: T,
     burner_start_timestamp: u32,
+    maintain_ch_state: CHState,
 }
 
 enum BoilerStatus {
@@ -32,8 +30,8 @@ enum BoilerStatus {
     BurnerModulation,
 }
 
-impl<D: OpenThermInterface, T: UptimeCounter> BoilerControl<D, T> {
-    pub fn new(opentherm_device: D, timer: T) -> BoilerControl<D, T>
+impl<D: OpenThermInterface> BoilerControl<D> {
+    pub fn new(opentherm_device: D) -> BoilerControl<D>
     where
         D: OpenThermInterface,
     {
@@ -41,26 +39,26 @@ impl<D: OpenThermInterface, T: UptimeCounter> BoilerControl<D, T> {
         //  read opentherm versions ?
         //  whichever is mandatory - multiple tries
         //  let state: BoilerStatus::Idle;
-        BoilerControl::<D, T> {
+        BoilerControl::<D> {
             state: BoilerStatus::Idle,
             communication_state: CommunicationState::StatusExchange,
             device: opentherm_device,
             boost_setpoint: BOOST_TEMPERATURE_DEFAULT,
             setpoint: MIN_TEMPERATURE_SETPOINT,
-            timer: timer,
             burner_start_timestamp: 0u32,
+            maintain_ch_state: CHState::Enable(false),
         }
     }
 
-    fn set_point_control(&mut self) {
-        let Temperature::Celsius(to_send) = match self.state {
+    fn set_point_control_internal(&mut self) {
+        let temp_to_send = match self.state {
             BoilerStatus::Uninitialized => MIN_TEMPERATURE_SETPOINT,
             BoilerStatus::Idle | BoilerStatus::BurnerModulation => self.setpoint,
             BoilerStatus::BurnerStart => self.setpoint + self.boost_setpoint,
         };
 
         self.device
-            .write(OpenThermMessageCode::BoilerTemperature, to_send as u32);
+            .write(DataOt::BoilerTemperature(temp_to_send));
     }
 
     fn state_transition(&mut self) {
@@ -68,22 +66,41 @@ impl<D: OpenThermInterface, T: UptimeCounter> BoilerControl<D, T> {
         //  BoilerStatus::Idle->BurenerStart->BurnerModulation
     }
 
+    pub fn enable_ch(&mut self, enable: CHState) -> Result<(),OtError> {
+        self.maintain_ch_state = enable;
+        Ok(())
+    }
+    pub fn set_point(&mut self, temperature: Temperature) -> Result<(),OtError> {
+        self.setpoint = temperature;
+        Ok(())
+    }
+
+    // boiler needs new thread to be maintained and only some calls to change cached state. This is
+    // still TODO
     // turn into await / use await driver for reading/writing OpenTherm Bus:
     pub async fn process(&mut self) -> Result<(), OtError> {
         self.state_transition(); //  check timer expiration and realize
                                  //  BoilerStatus::BurnerStart->BurnerModulation transition
         let new_state = match self.communication_state {
             CommunicationState::StatusExchange => {
-                self.device.write(OpenThermMessageCode::Status, 0x00);
+                let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true));  //  temporarily always on.
+                if let Ok(slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
+                }
+                else {
+                    log::error!("Boiler failed to report Status!");
+                }
                 CommunicationState::Control
             }
             CommunicationState::Control => {
-                self.set_point_control();
+                self.set_point_control_internal();
                 CommunicationState::Diagnostics
             }
             CommunicationState::Diagnostics => {
-                if let Ok(value) = self.device.read(OpenThermMessageCode::BoilerTemperature).await {
+                if let Ok(value) = self.device.read(DataOt::BoilerTemperature(Default::default())).await {
                     value; //  compose diagnostics
+                }
+                else {
+                    log::error!("Boiler response failure");
                 }
                 CommunicationState::StatusExchange
             }

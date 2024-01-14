@@ -12,6 +12,8 @@ mod boiler_simulation;
 mod manchester;
 mod opentherm_interface;
 
+use boiler::BoilerControl;
+use boiler_simulation::BoilerSimulation;
 use core::mem;
 use cyw43_pio::PioSpi;
 use defmt::*;
@@ -25,8 +27,8 @@ use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec;
 use manchester::manchester_decode;
-use boiler_simulation::BoilerSimulation;
-use opentherm_interface::{Error as OtError, MessageType, OpenThermInterface, OpenThermMessage, OpenThermMessageCode};
+use opentherm_interface::{Error as OtError, MessageType, OpenThermInterface, OpenThermMessage, OpenThermMessageCode, DataOt};
+use opentherm_interface::{Temperature, CHState};
 use opentherm_interface::{
     CAPTURE_OT_FRAME_PAYLOAD_SIZE, MESSAGE_DATA_ID_BIT_LEN, MESSAGE_DATA_VALUE_BIT_LEN, MESSAGE_TYPE_BIT_LEN,
     OT_FRAME_SKIP_SPARE,
@@ -101,30 +103,17 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermBus<E, T> {
 }
 
 impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for OpenThermBus<E, T> {
-    async fn write(&mut self, cmd: OpenThermMessageCode, data: u32) -> Result<(), OtError> {
-        let msg = OpenThermMessage::new(0x0);
-        match msg {
-            Ok(msg) => {
-                self.edge_trigger_drv.trigger(msg.iter());
-            }
-            _ => {
-                ();
-            }
-        }
-        Ok(())
-    }
-    async fn read(&mut self, cmd: OpenThermMessageCode) -> Result<u32, OtError> {
+    async fn listen(&mut self) -> Result<DataOt, OtError> {
         match self
             .edge_capture_drv
             .start_capture(10 * MANCHESTER_RESOLUTION, Duration::from_secs(20)) //  a timeout for active capture
             .await
         {
-            Ok((init_state, vector)) => {
+            Ok((init_state, vector)) => {  //  caputure
                 log::info!("got data of length: {}", vector.len());
-                //  for (i, item) in vector.iter().enumerate() {
-                //      log::info!("got vec[{}]: {}", i, item);
-                //  }
-                match manchester_decode(init_state, vector, MANCHESTER_RESOLUTION) {
+
+                //  let received_message = OpenThermMessage::new_from_iter(ManchesterIteratorAdapter::new(vector.iter()));
+                let received_message = match manchester_decode(init_state, vector, MANCHESTER_RESOLUTION) {
                     Ok(vec) => {
                         if vec.len() != TOTAL_CAPTURE_OT_FRAME_SIZE {
                             return Err(OtError::InvalidLength);
@@ -136,7 +125,7 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
                         }
 
                         let opentherm_frame_iterator = vec.iter().skip(1).take(CAPTURE_OT_FRAME_PAYLOAD_SIZE);
-                        let _msg = OpenThermMessage::new_from_iter(opentherm_frame_iterator);
+                        let ret_msg = OpenThermMessage::new_from_iter(opentherm_frame_iterator);
 
                         let iter = vec
                             .iter()
@@ -154,23 +143,67 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
                                 return Err(OtError::DecodingError);
                             }
                         }
+                        //  Return positive value:
+                        ret_msg
                     }
                     Err(err) => {
                         log::error!("Decoding error: {:#?}", err);
+                        return Err(OtError::DecodingError);
                     }
-                }
+                };
             }
             Err(_) => {
                 log::info!("got err");
             }
         }
-        Ok(0x00_u32)
+        log::error!("Unexpected result capture error");
+        return Err(OtError::UnexpectedResult);
+    }
+
+    async fn write(&mut self, cmd: DataOt) -> Result<(), OtError> {
+        let msg = OpenThermMessage::new_from_data_ot(MessageType::WriteData, cmd);
+        match msg {
+            Ok(msg) => {
+                self.edge_trigger_drv.trigger(msg.iter()).await;
+            }
+            _ => {
+                return Err(OtError::DecodingError);
+            }
+        }
+        Ok(())
+    }
+    async fn read(&mut self, cmd: DataOt) -> Result<DataOt, OtError> {
+        let msg = OpenThermMessage::new_from_data_ot(MessageType::ReadData, cmd);
+        let result = match msg {
+            Ok(msg) => {
+                match self.edge_trigger_drv.trigger(msg.iter()).await {
+                    Ok(()) => {  //  Successful send:
+                        //  read and return value or error as it is
+                        self.listen().await
+                    }
+                    Err(error) => {
+                        log::error!("Trigger error!");
+                        return Err(OtError::BusError);
+                    }
+                }
+            }
+            _ => {
+                return Err(OtError::DecodingError);
+            }
+        };
+        result
     }
 }
 
 struct ManchesterIteratorAdapter<I: Iterator<Item = bool>> {
     iterator: I,
     next_bit: Option<bool>,
+}
+
+impl<I: Iterator<Item = bool>> ManchesterIteratorAdapter<I> {
+    fn new(iterator: I) -> Self {
+        crate::todo!()
+    }
 }
 
 impl<I: Iterator<Item = bool>> Iterator for ManchesterIteratorAdapter<I> {
@@ -202,6 +235,7 @@ impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin> {
         self.output_pin.set_low(); //  generate idle state:
         Timer::after(period).await; //  await one period in idle state
 
+        //  This loop already handles the manchester encoding:
         for item in iterator {
             // iterator.for_each( async move |item| {
             if item == true {
@@ -245,7 +279,6 @@ impl<'d, InPin: Pin, const N: usize> EdgeCaptureInterface<N> for RpEdgeCapture<'
     //  add wait init state: low/high, how long
     async fn start_capture(
         &mut self,
-        //  input_pin: &mut Input<'static, PIN_15>,
         timeout_inactive_capture: Duration,
         timeout_till_active_capture: Duration,
     ) -> Result<(InitLevel, Vec<Duration, N>), CaptureError> {
@@ -328,22 +361,25 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn boiler_simulation_task(async_input: Input<'static, PIN_15>, async_output: Output<'static, PIN_13>) -> ! {
+async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_output: Output<'static, PIN_13>) -> ! {
     let _init_instant = Instant::now();
     log::info!("Start capture device:");
     let mut capture_device = RpEdgeCapture::new(async_input);
     let mut trigger_device = RpEdgeTrigger::new(async_output);
 
     let mut open_therm_bus = OpenThermBus::new(capture_device, trigger_device);
-    let boiler_controller = BoilerSimulation::new();
+    let mut boiler_simulation = BoilerSimulation::new();
 
     loop {
         //  async fn read(&mut self, cmd: OpenThermMessageCode) -> Result<u32, OtError> {
-        let response = match open_therm_bus.read(OpenThermMessageCode::Status).await {
+        let response = match open_therm_bus.listen().await {
             Ok(read_value) => {
-                log::info!("OpenThermBus.read() = {read_value}");
-                let (cmd, ret) = boiler_controller.process(OpenThermMessageCode::Status, 0x00_u32).unwrap();
-                Some((cmd, ret))
+                //  log::info!("OpenThermBus.read() = {read_value}");
+                //  let _data_to_be_send = DataOt::MasterStatus(Default::default());
+                let cmd = boiler_simulation
+                    .process(read_value)
+                    .unwrap();
+                Some(cmd)
             }
             Err(_) => {
                 log::error!("Error: OpenThermBus.read()");
@@ -351,12 +387,9 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_15>, async_outpu
             }
         };
         match response {
-            Some((cmd, response)) => {
-                open_therm_bus
-                    .write(cmd, response)
-                    .await
-                    .unwrap();
-                },
+            Some(cmd) => {
+                open_therm_bus.write(cmd).await.unwrap();
+            }
             None => {
                 ();
             }
@@ -365,23 +398,27 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_15>, async_outpu
 }
 
 #[embassy_executor::task]
-async fn boiler_controller_task(async_input: Input<'static, PIN_12>, mut async_output: Output<'static, PIN_14>) -> ! {
+async fn boiler_controller_task(async_input: Input<'static, PIN_14>, mut async_output: Output<'static, PIN_15>) -> ! {
     //  const PERIOD_GENERATE_SEC: usize = 1
     let mut capture_device = RpEdgeCapture::new(async_input);
     let mut trigger_device = RpEdgeTrigger::new(async_output);
 
     let mut open_therm_bus = OpenThermBus::new(capture_device, trigger_device);
+    let mut boiler_controller = BoilerControl::new(open_therm_bus);
 
+    boiler_controller.set_point(Temperature::Celsius(16));
+    boiler_controller.enable_ch(CHState::Enable(true));
     loop {
-        open_therm_bus
-            .write(OpenThermMessageCode::Status, 0x00_u32)
-            .await
-            .unwrap();
-        Timer::after_millis(50).await;
-        match open_therm_bus.read(OpenThermMessageCode::Status).await {
-            Ok(read_value) => log::info!("OpenThermBus.read() = {read_value}"),
-            Err(_) => log::error!("Error: OpenThermBus.read()"),
-        }
+        boiler_controller.process().await;
+        //  open_therm_bus
+        //      .write(OpenThermMessageCode::Status, 0x00_u32)
+        //      .await
+        //      .unwrap();
+        //  Timer::after_millis(50).await;
+        //  match open_therm_bus.read(OpenThermMessageCode::Status).await {
+        //      Ok(read_value) => log::info!("OpenThermBus.read() = {read_value}"),
+        //      Err(_) => log::error!("Error: OpenThermBus.read()"),
+        //  }
     }
     //  let period = MANCHESTER_RESOLUTION;
     //  let generate_pattern = 0x10255432_u32;
@@ -440,10 +477,10 @@ async fn main(spawner: Spawner) {
     Timer::after_secs(2).await;
     log::info!("Init at {}", Instant::now());
 
-    let mut gpio_output = Output::new(p.PIN_14, Level::Low);
-    let gpio_input = Input::new(p.PIN_12, Pull::Up);
+    let mut gpio_output = Output::new(p.PIN_15, Level::Low);
+    let gpio_input = Input::new(p.PIN_14, Pull::Up);
     gpio_output.set_low(); //  Initial idle state for open therm bus
-    let async_input = Input::new(p.PIN_15, Pull::Up);
+    let async_input = Input::new(p.PIN_12, Pull::Up);
     let async_output = Output::new(p.PIN_13, Level::Low);
 
     unwrap!(spawner.spawn(boiler_simulation_task(async_input, async_output)));
@@ -493,7 +530,7 @@ async fn main(spawner: Spawner) {
 
     let _output = manchester_decode(InitLevel::Low, wire_state_periods, MANCHESTER_RESOLUTION);
 
-    log::info!("Infinite loop sstart");
+    log::info!("Infinite emppty loop sstart");
     loop {
         Timer::after_secs(1).await;
     }

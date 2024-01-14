@@ -107,7 +107,7 @@ impl Default for DWHState {
 
 #[derive(Copy, Clone)]
 pub enum FlameState {
-    Active(bool)
+    Active(bool),
 }
 
 impl Default for FlameState {
@@ -265,8 +265,8 @@ enum OpenThermIteratorState {
 pub struct OpenThermMessageIterator<'a> {
     message: &'a OpenThermMessage,
     state: OpenThermIteratorState,
-    parity_count: u32,  //  parity count + Stop Bit which means that it should yield odd number of
-                        //  ones in the 33 LSb of the frame
+    parity_count: u32, //  parity count + Stop Bit which means that it should yield odd number of
+                       //  ones in the 33 LSb of the frame
 }
 
 impl<'a> Iterator for OpenThermMessageIterator<'a> {
@@ -311,10 +311,10 @@ impl<'a> Iterator for OpenThermMessageIterator<'a> {
         };
         self.state = new_state;
 
-        match return_value{
+        match return_value {
             Some(v) => {
                 self.parity_count += v as u32;
-            },
+            }
             _ => {}
         }
         return_value

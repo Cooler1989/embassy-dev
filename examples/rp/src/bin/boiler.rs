@@ -1,5 +1,7 @@
 use crate::opentherm_interface::Error as OtError;
-use crate::opentherm_interface::{CommunicationState, OpenThermInterface, OpenThermMessageCode, Temperature, DataOt, CHState, DWHState, MasterStatus};
+use crate::opentherm_interface::{
+    CHState, CommunicationState, DWHState, DataOt, MasterStatus, OpenThermInterface, OpenThermMessageCode, Temperature,
+};
 
 const MIN_TEMPERATURE_SETPOINT: Temperature = Temperature::Celsius(16i16);
 const BOOST_TEMPERATURE_DEFAULT: Temperature = Temperature::Celsius(24i16);
@@ -57,8 +59,7 @@ impl<D: OpenThermInterface> BoilerControl<D> {
             BoilerStatus::BurnerStart => self.setpoint + self.boost_setpoint,
         };
 
-        self.device
-            .write(DataOt::BoilerTemperature(temp_to_send));
+        self.device.write(DataOt::BoilerTemperature(temp_to_send));
     }
 
     fn state_transition(&mut self) {
@@ -66,11 +67,11 @@ impl<D: OpenThermInterface> BoilerControl<D> {
         //  BoilerStatus::Idle->BurenerStart->BurnerModulation
     }
 
-    pub fn enable_ch(&mut self, enable: CHState) -> Result<(),OtError> {
+    pub fn enable_ch(&mut self, enable: CHState) -> Result<(), OtError> {
         self.maintain_ch_state = enable;
         Ok(())
     }
-    pub fn set_point(&mut self, temperature: Temperature) -> Result<(),OtError> {
+    pub fn set_point(&mut self, temperature: Temperature) -> Result<(), OtError> {
         self.setpoint = temperature;
         Ok(())
     }
@@ -83,11 +84,10 @@ impl<D: OpenThermInterface> BoilerControl<D> {
                                  //  BoilerStatus::BurnerStart->BurnerModulation transition
         let new_state = match self.communication_state {
             CommunicationState::StatusExchange => {
-                let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true));  //  temporarily always on.
+                let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily always on.
                 if let Ok(slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
                     //  sent was correct
-                }
-                else {
+                } else {
                     log::error!("Boiler failed to report Status!");
                 }
                 CommunicationState::Control
@@ -99,8 +99,7 @@ impl<D: OpenThermInterface> BoilerControl<D> {
             CommunicationState::Diagnostics => {
                 if let Ok(value) = self.device.read(DataOt::BoilerTemperature(Default::default())).await {
                     value; //  compose diagnostics
-                }
-                else {
+                } else {
                     log::error!("Boiler response failure");
                 }
                 CommunicationState::StatusExchange

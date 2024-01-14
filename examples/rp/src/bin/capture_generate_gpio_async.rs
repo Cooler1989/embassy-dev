@@ -27,8 +27,10 @@ use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec;
 use manchester::manchester_decode;
-use opentherm_interface::{Error as OtError, MessageType, OpenThermInterface, OpenThermMessage, OpenThermMessageCode, DataOt};
-use opentherm_interface::{Temperature, CHState};
+use opentherm_interface::{CHState, Temperature};
+use opentherm_interface::{
+    DataOt, Error as OtError, MessageType, OpenThermInterface, OpenThermMessage, OpenThermMessageCode,
+};
 use opentherm_interface::{
     CAPTURE_OT_FRAME_PAYLOAD_SIZE, MESSAGE_DATA_ID_BIT_LEN, MESSAGE_DATA_VALUE_BIT_LEN, MESSAGE_TYPE_BIT_LEN,
     OT_FRAME_SKIP_SPARE,
@@ -113,9 +115,10 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermBus<E, T> {
 
                 let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
                 match self.edge_trigger_drv.trigger(manchester_adapter).await {
-                    Ok(()) => {  //  Successful send:
-                                 //  read and return value or error as it is
-                        self.listen().await  //  await response
+                    Ok(()) => {
+                        //  Successful send:
+                        //  read and return value or error as it is
+                        self.listen().await //  await response
                     }
                     Err(error) => {
                         log::error!("Trigger error!");
@@ -138,7 +141,8 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
             .start_capture(10 * MANCHESTER_RESOLUTION, Duration::from_secs(20)) //  a timeout for active capture
             .await
         {
-            Ok((init_state, vector)) => {  //  caputure
+            Ok((init_state, vector)) => {
+                //  caputure
                 log::info!("got data of length: {}", vector.len());
 
                 //  let received_message = OpenThermMessage::new_from_iter(ManchesterIteratorAdapter::new(vector.iter()));
@@ -205,7 +209,10 @@ struct ManchesterIteratorAdapter<I: Iterator<Item = bool>> {
 
 impl<I: Iterator<Item = bool>> ManchesterIteratorAdapter<I> {
     fn new(iterator_arg: I) -> Self {
-        Self{ iterator: iterator_arg, next_bit: None}
+        Self {
+            iterator: iterator_arg,
+            next_bit: None,
+        }
     }
 }
 
@@ -214,7 +221,7 @@ impl<I: Iterator<Item = bool>> Iterator for ManchesterIteratorAdapter<I> {
     fn next(&mut self) -> Option<Self::Item> {
         let ret = match self.next_bit {
             None => match self.iterator.next() {
-                None => None,  //  depleted
+                None => None, //  depleted
                 Some(bit) => {
                     self.next_bit = Some(bit);
                     Some(!bit)
@@ -386,9 +393,7 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_outpu
     loop {
         let response = match open_therm_bus.listen().await {
             Ok(read_value) => {
-                let cmd = boiler_simulation
-                    .process(read_value)
-                    .unwrap();
+                let cmd = boiler_simulation.process(read_value).unwrap();
                 Some(cmd)
             }
             Err(_) => {

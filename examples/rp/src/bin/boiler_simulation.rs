@@ -1,8 +1,9 @@
 use crate::opentherm_interface::Error as OtError;
 use crate::opentherm_interface::{
-    CHState, CommunicationState, MessageType, OpenThermInterface, OpenThermMessage, OpenThermMessageCode, Temperature, DataOt,
+    CHState, CommunicationState, DataOt, MessageType, OpenThermInterface, OpenThermMessage, OpenThermMessageCode,
+    Temperature,
 };
-use crate::opentherm_interface::{SlaveStatus, DWHState, FlameState};
+use crate::opentherm_interface::{DWHState, FlameState, SlaveStatus};
 use embassy_time::{Duration, Instant, Timer};
 
 const TEMP_RATE_PER_60SEC: Temperature = Temperature::Celsius(5);
@@ -31,7 +32,6 @@ impl BoilerSimulation {
             dwh_active: DWHState::Enable(true),
             flame: FlameState::Active(false),
             last_process_call: Instant::now(),
-
         }
     }
     //  accepts OpenTherm message
@@ -42,10 +42,12 @@ impl BoilerSimulation {
         // update the boiler stat
 
         // elevate integer calculation 1000 times
-        let time_ratio_ticks = 1000_u64*period_last_call.as_ticks()/Duration::from_secs(60).as_ticks();
+        let time_ratio_ticks = 1000_u64 * period_last_call.as_ticks() / Duration::from_secs(60).as_ticks();
         let new_temperature = match self.boiler_temperature {
             Temperature::Celsius(int) => {
-                let coef = match TEMP_RATE_PER_60SEC { Temperature::Celsius(v) => 1000*v };
+                let coef = match TEMP_RATE_PER_60SEC {
+                    Temperature::Celsius(v) => 1000 * v,
+                };
             }
         };
 
@@ -56,7 +58,7 @@ impl BoilerSimulation {
                 self.on_off_state = status.ch_enable;
                 self.dwh_active = status.dwh_enable;
                 Ok(DataOt::SlaveStatus(slave_status))
-            },
+            }
             _ => {
                 return Err(OtError::CommandNotSupported);
             }

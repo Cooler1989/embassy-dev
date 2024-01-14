@@ -253,6 +253,7 @@ pub struct OpenThermMessage {
 //?
 enum OpenThermIteratorState {
     StartBit,
+    Parity,
     MessageType3b(u8),
     Spare4b(u8),
     DataId8b(u8),
@@ -264,13 +265,16 @@ enum OpenThermIteratorState {
 pub struct OpenThermMessageIterator<'a> {
     message: &'a OpenThermMessage,
     state: OpenThermIteratorState,
+    parity_count: u32,  //  parity count + Stop Bit which means that it should yield odd number of
+                        //  ones in the 33 LSb of the frame
 }
 
 impl<'a> Iterator for OpenThermMessageIterator<'a> {
     type Item = bool;
     fn next(&mut self) -> Option<Self::Item> {
         let (new_state, return_value) = match self.state {
-            OpenThermIteratorState::StartBit => (OpenThermIteratorState::MessageType3b(0), Some(true)),
+            OpenThermIteratorState::StartBit => (OpenThermIteratorState::Parity, Some(true)),
+            OpenThermIteratorState::Parity => (OpenThermIteratorState::MessageType3b(0), Some(true)),
             OpenThermIteratorState::MessageType3b(shift) => {
                 let value = 0_u8 != (self.message.msg_type as u8) & (0x1_u8 << shift);
                 if shift >= MESSAGE_TYPE_BIT_LEN as u8 - 1 {
@@ -281,7 +285,7 @@ impl<'a> Iterator for OpenThermMessageIterator<'a> {
             }
             OpenThermIteratorState::Spare4b(shift) => {
                 if shift >= OT_FRAME_SKIP_SPARE as u8 - 1 {
-                    (OpenThermIteratorState::StopBit, Some(false))
+                    (OpenThermIteratorState::DataId8b(0), Some(false))
                 } else {
                     (OpenThermIteratorState::Spare4b(shift + 1), Some(false))
                 }
@@ -306,6 +310,13 @@ impl<'a> Iterator for OpenThermMessageIterator<'a> {
             _ => (OpenThermIteratorState::Depleted, None),
         };
         self.state = new_state;
+
+        match return_value{
+            Some(v) => {
+                self.parity_count += v as u32;
+            },
+            _ => {}
+        }
         return_value
     }
 }
@@ -315,6 +326,7 @@ impl OpenThermMessage {
         OpenThermMessageIterator {
             message: self,
             state: OpenThermIteratorState::StartBit,
+            parity_count: 0u32,
         }
     }
     fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {

@@ -85,6 +85,7 @@ impl<D: OpenThermInterface> BoilerControl<D> {
             CommunicationState::StatusExchange => {
                 let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true));  //  temporarily always on.
                 if let Ok(slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
+                    //  sent was correct
                 }
                 else {
                     log::error!("Boiler failed to report Status!");

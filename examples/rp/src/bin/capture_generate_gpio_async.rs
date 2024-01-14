@@ -164,7 +164,8 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
         let msg = OpenThermMessage::new_from_data_ot(MessageType::WriteData, cmd);
         match msg {
             Ok(msg) => {
-                self.edge_trigger_drv.trigger(msg.iter()).await;
+                let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
+                self.edge_trigger_drv.trigger(manchester_adapter).await;
             }
             _ => {
                 return Err(OtError::DecodingError);
@@ -174,9 +175,37 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
     }
     async fn read(&mut self, cmd: DataOt) -> Result<DataOt, OtError> {
         let msg = OpenThermMessage::new_from_data_ot(MessageType::ReadData, cmd);
+
+        //  let mut count = 0u32;
+        //  let iterator = msg.iter();
+        //  let (folded, count) =
+        //      iterator
+        //          .clone()
+        //          .take(CAPTURE_OT_FRAME_PAYLOAD_SIZE)
+        //          .enumerate()
+        //          .fold((0_u64, 0_u32), |(acc, count), (i, &bit_state)| {
+        //              let bit: u64 = match *bit_state {
+        //                  true => 1_u64,
+        //                  false => 0_u64,
+        //              };
+        //              let value = acc | (bit << i);
+        //              count += 1_u32;
+        //              (value, count)
+        //          });
+        //  log::info!("Folded OR: 0x{:x}", folded);
+        //  log::info!("Edge Trigger count: {count}");
+
+
         let result = match msg {
             Ok(msg) => {
-                match self.edge_trigger_drv.trigger(msg.iter()).await {
+                let mut count = 0u32;
+                for item in msg.iter() {
+                    count += 1u32;
+                    log::info!("msg[{count}] = {}", item as bool);
+                }
+
+                let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
+                match self.edge_trigger_drv.trigger(manchester_adapter).await {
                     Ok(()) => {  //  Successful send:
                         //  read and return value or error as it is
                         self.listen().await
@@ -201,17 +230,17 @@ struct ManchesterIteratorAdapter<I: Iterator<Item = bool>> {
 }
 
 impl<I: Iterator<Item = bool>> ManchesterIteratorAdapter<I> {
-    fn new(iterator: I) -> Self {
-        crate::todo!()
+    fn new(iterator_arg: I) -> Self {
+        Self{ iterator: iterator_arg, next_bit: None}
     }
 }
 
 impl<I: Iterator<Item = bool>> Iterator for ManchesterIteratorAdapter<I> {
     type Item = bool;
     fn next(&mut self) -> Option<Self::Item> {
-        match self.next_bit {
+        let ret = match self.next_bit {
             None => match self.iterator.next() {
-                None => None,
+                None => None,  //  depleted
                 Some(bit) => {
                     self.next_bit = Some(bit);
                     Some(!bit)
@@ -221,13 +250,23 @@ impl<I: Iterator<Item = bool>> Iterator for ManchesterIteratorAdapter<I> {
                 self.next_bit = None;
                 Some(bit)
             }
-        }
+        };
+        ret
     }
 }
 
 struct RpEdgeTrigger<'d, OutPin: Pin> {
     output_pin: Output<'d, OutPin>,
 }
+
+//  fn resolve_folded(iterator: impl Iterator<Item = bool> + Clone) -> u32 {
+//      let mut count = 0u32;
+//      for item in iterator.clone() {
+//          count += 1u32;
+//      }
+//      log::info!("Edge Trigger count: {count}");
+//      count
+//  }
 
 impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin> {
     async fn trigger(&mut self, iterator: impl Iterator<Item = bool>) -> Result<(), TriggerError> {
@@ -236,6 +275,7 @@ impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin> {
         Timer::after(period).await; //  await one period in idle state
 
         //  This loop already handles the manchester encoding:
+        let mut count = 0u32;
         for item in iterator {
             // iterator.for_each( async move |item| {
             if item == true {
@@ -244,10 +284,9 @@ impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin> {
                 self.output_pin.set_low();
             }
             Timer::after(period).await;
-            self.output_pin.toggle();
-            Timer::after(period).await;
+            count += 1u32;
         }
-        //  });
+        log::info!("Edge Trigger sent count: {count}");
 
         self.output_pin.set_low(); //  generate idle state after
         Timer::after(period).await; //  await one period in idle state
@@ -371,11 +410,8 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_outpu
     let mut boiler_simulation = BoilerSimulation::new();
 
     loop {
-        //  async fn read(&mut self, cmd: OpenThermMessageCode) -> Result<u32, OtError> {
         let response = match open_therm_bus.listen().await {
             Ok(read_value) => {
-                //  log::info!("OpenThermBus.read() = {read_value}");
-                //  let _data_to_be_send = DataOt::MasterStatus(Default::default());
                 let cmd = boiler_simulation
                     .process(read_value)
                     .unwrap();
@@ -386,6 +422,10 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_outpu
                 None
             }
         };
+
+        //  Send response:
+        Timer::after_secs(3).await;
+
         match response {
             Some(cmd) => {
                 open_therm_bus.write(cmd).await.unwrap();
@@ -409,7 +449,10 @@ async fn boiler_controller_task(async_input: Input<'static, PIN_14>, mut async_o
     boiler_controller.set_point(Temperature::Celsius(16));
     boiler_controller.enable_ch(CHState::Enable(true));
     loop {
+        log::info!("Process Boiler controller call");
         boiler_controller.process().await;
+        Timer::after_secs(10).await;
+
         //  open_therm_bus
         //      .write(OpenThermMessageCode::Status, 0x00_u32)
         //      .await
@@ -513,14 +556,6 @@ async fn main(spawner: Spawner) {
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
 
-    //  let mut scanner = control.scan().await;
-    //  while let Some(bss) = scanner.next().await {
-    //      if let Ok(ssid_str) = str::from_utf8(&bss.ssid) {
-    //          log::info!("scanned {}", ssid_str);
-    //      }
-    //  }
-    //  generate_manchester_output(gpio_output, &generate_output_data).unwrap();
-
     const VEC_SIZE_MANCHESTER: usize = 128usize;
     let mut wire_state_periods = Vec::<Duration, VEC_SIZE_MANCHESTER>::new();
     let now = Instant::now();
@@ -532,18 +567,6 @@ async fn main(spawner: Spawner) {
 
     log::info!("Infinite emppty loop sstart");
     loop {
-        Timer::after_secs(1).await;
-    }
-    loop {
-        //  async_input.wait_for_low().await;
-        control.gpio_set(0, true).await;
-        let instant_low = Instant::now();
-        log::info!("PIN_14 -> LOW at {}", instant_low);
-        Timer::after_secs(1).await;
-        //  async_input.wait_for_high().await;
-        control.gpio_set(0, false).await;
-        let instant_high = Instant::now();
-        log::info!("PIN_14 -> HIGH at {}", instant_high);
         Timer::after_secs(1).await;
     }
 }

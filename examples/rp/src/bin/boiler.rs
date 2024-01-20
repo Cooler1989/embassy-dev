@@ -5,6 +5,7 @@ use crate::opentherm_interface::{
 
 const MIN_TEMPERATURE_SETPOINT: Temperature = Temperature::Celsius(16i16);
 const BOOST_TEMPERATURE_DEFAULT: Temperature = Temperature::Celsius(24i16);
+const SETPOINT_MAX_TEMPERATURE_DEFAULT: Temperature = Temperature::Celsius(80i16);
 const BURNER_START_LOW_TRESHOLD: Temperature = Temperature::Celsius(6i16);
 const BURNER_STOP_HIGH_TRESHOLD: Temperature = Temperature::Celsius(8i16);
 
@@ -21,6 +22,7 @@ pub struct BoilerControl<D: OpenThermInterface> {
     device: D,
     boost_setpoint: Temperature,
     setpoint: Temperature,
+    max_setpoint: Temperature,
     burner_start_timestamp: u32,
     maintain_ch_state: CHState,
 }
@@ -46,6 +48,7 @@ impl<D: OpenThermInterface> BoilerControl<D> {
             communication_state: CommunicationState::StatusExchange,
             device: opentherm_device,
             boost_setpoint: BOOST_TEMPERATURE_DEFAULT,
+            max_setpoint: SETPOINT_MAX_TEMPERATURE_DEFAULT,
             setpoint: MIN_TEMPERATURE_SETPOINT,
             burner_start_timestamp: 0u32,
             maintain_ch_state: CHState::Enable(false),
@@ -57,6 +60,11 @@ impl<D: OpenThermInterface> BoilerControl<D> {
             BoilerStatus::Uninitialized => MIN_TEMPERATURE_SETPOINT,
             BoilerStatus::Idle | BoilerStatus::BurnerModulation => self.setpoint,
             BoilerStatus::BurnerStart => self.setpoint + self.boost_setpoint,
+        };
+        let temp_to_send = if temp_to_send < SETPOINT_MAX_TEMPERATURE_DEFAULT {
+            temp_to_send
+        } else {
+            SETPOINT_MAX_TEMPERATURE_DEFAULT
         };
 
         self.device.write(DataOt::BoilerTemperature(temp_to_send));
@@ -80,32 +88,40 @@ impl<D: OpenThermInterface> BoilerControl<D> {
     // still TODO
     // turn into await / use await driver for reading/writing OpenTherm Bus:
     pub async fn process(&mut self) -> Result<(), OtError> {
-        self.state_transition(); //  check timer expiration and realize
-                                 //  BoilerStatus::BurnerStart->BurnerModulation transition
-        let new_state = match self.communication_state {
-            CommunicationState::StatusExchange => {
-                let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily always on.
-                if let Ok(slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
-                    //  sent was correct
-                } else {
-                    log::error!("Boiler failed to report Status!");
-                }
-                CommunicationState::Control
-            }
-            CommunicationState::Control => {
-                self.set_point_control_internal();
-                CommunicationState::Diagnostics
-            }
-            CommunicationState::Diagnostics => {
-                if let Ok(value) = self.device.read(DataOt::BoilerTemperature(Default::default())).await {
-                    value; //  compose diagnostics
-                } else {
-                    log::error!("Boiler response failure");
-                }
-                CommunicationState::StatusExchange
-            }
-        };
-        self.communication_state = new_state;
+        let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily always on.
+        if let Ok(slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
+            //  sent was correct
+        } else {
+            log::error!("Boiler failed to report Status!");
+        }
+        //
+        //  self.state_transition(); //  check timer expiration and realize
+        //                           //  BoilerStatus::BurnerStart->BurnerModulation transition
+        //  let new_state = match self.communication_state {
+        //      CommunicationState::StatusExchange => {
+        //          //  log::info("Boiler p
+        //          let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily always on.
+        //          if let Ok(slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
+        //              //  sent was correct
+        //          } else {
+        //              log::error!("Boiler failed to report Status!");
+        //          }
+        //          CommunicationState::Control
+        //      }
+        //      CommunicationState::Control => {
+        //          self.set_point_control_internal();
+        //          CommunicationState::Diagnostics
+        //      }
+        //      CommunicationState::Diagnostics => {
+        //          if let Ok(value) = self.device.read(DataOt::BoilerTemperature(Default::default())).await {
+        //              value; //  compose diagnostics
+        //          } else {
+        //              log::error!("Boiler response failure");
+        //          }
+        //          CommunicationState::StatusExchange
+        //      }
+        //  };
+        //  self.communication_state = new_state;
         Ok(())
     }
     //  Always or on demand / or combined?

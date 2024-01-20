@@ -9,6 +9,7 @@
 
 mod boiler;
 mod boiler_simulation;
+mod edge_trigger_capture_interface;
 mod manchester;
 mod opentherm_interface;
 
@@ -17,6 +18,8 @@ use boiler_simulation::BoilerSimulation;
 use core::mem;
 use cyw43_pio::PioSpi;
 use defmt::*;
+pub use edge_trigger_capture_interface::InitLevel;
+use edge_trigger_capture_interface::{CaptureError, EdgeCaptureInterface, EdgeTriggerInterface, TriggerError};
 use embassy_executor::Spawner;
 use embassy_net::Stack;
 use embassy_rp::bind_interrupts;
@@ -48,44 +51,11 @@ pub enum GenerateError {
     GenericError,
 }
 
-enum TriggerError {
-    GenericError,
-}
-
-pub enum CaptureError {
-    GenericError,
-    InvalidData,
-    NotEnoughSpace,
-}
-
 const MANCHESTER_RESOLUTION: Duration = Duration::from_millis(10u64);
 
 const TOTAL_CAPTURE_OT_FRAME_SIZE: usize = 34usize;
 
-#[derive(Clone, PartialEq)]
-pub enum InitLevel {
-    Low,
-    High,
-}
-
-pub enum FinishState {
-    IdleState,
-    TimeoutReached,
-    CountReached,
-}
-
-trait EdgeTriggerInterface {
-    async fn trigger(&mut self, iterator: impl Iterator<Item = bool>) -> Result<(), TriggerError>;
-}
-
-trait EdgeCaptureInterface<const N: usize = 128> {
-    //  TODO: specify /generically/ idle level or maybe better, return one captured:
-    async fn start_capture(
-        &mut self,
-        timeout_inactive_capture: Duration,
-        timeout_till_active_capture: Duration,
-    ) -> Result<(InitLevel, Vec<Duration, N>), CaptureError>;
-}
+const VEC_SIZE_MANCHASTER: usize = 128usize;
 
 struct OpenThermBus<E: EdgeCaptureInterface, T: EdgeTriggerInterface> {
     edge_capture_drv: E,
@@ -143,7 +113,7 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
         {
             Ok((init_state, vector)) => {
                 //  caputure
-                log::info!("got data of length: {}", vector.len());
+                log::info!("BS: got data of length: {}", vector.len());
 
                 //  let received_message = OpenThermMessage::new_from_iter(ManchesterIteratorAdapter::new(vector.iter()));
                 let received_message = match manchester_decode(init_state, vector, MANCHESTER_RESOLUTION) {
@@ -284,7 +254,7 @@ where
     }
 }
 
-struct RpEdgeCapture<'d, InPin: Pin, const N: usize = 128> {
+struct RpEdgeCapture<'d, InPin: Pin, const N: usize = VEC_SIZE_MANCHASTER> {
     input_pin: Input<'d, InPin>,
 }
 
@@ -316,7 +286,10 @@ impl<'d, InPin: Pin, const N: usize> EdgeCaptureInterface<N> for RpEdgeCapture<'
         while !timestamps.is_full() {
             //  pub async fn with_timeout<F: Future>(timeout: Duration, fut: F) -> Result<F::Output, TimeoutError> {
             let timeout = match timestamps.is_empty() {
-                true => timeout_till_active_capture,
+                true => {
+                    log::info!("Start capture at: {}_t", Instant::now());
+                    timeout_till_active_capture
+                }
                 false => timeout_inactive_capture,
             };
             match embassy_time::with_timeout(timeout, async {
@@ -340,6 +313,7 @@ impl<'d, InPin: Pin, const N: usize> EdgeCaptureInterface<N> for RpEdgeCapture<'
                     timestamps
                         .insert(0, Instant::now().duration_since(capture_timestamp))
                         .unwrap(); //  here handle error
+                    log::info!("Break capture with timeout: {}", timeout);
                     break;
                 } //  TODO: check if the error was timeout
             }
@@ -393,6 +367,7 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_outpu
     loop {
         let response = match open_therm_bus.listen().await {
             Ok(read_value) => {
+                log::info!("Boiler Simulation task got some data");
                 let cmd = boiler_simulation.process(read_value).unwrap();
                 Some(cmd)
             }
@@ -474,7 +449,7 @@ async fn boiler_controller_task(async_input: Input<'static, PIN_14>, mut async_o
 
 async fn generate_manchester_output(
     gpio: &mut Output<'static, PIN_14>,
-    data: &Vec<bool, 128usize>,
+    data: &Vec<bool, VEC_SIZE_MANCHASTER>,
     period: Duration,
 ) -> Result<(), GenerateError> {
     for item in data {
@@ -534,15 +509,6 @@ async fn main(spawner: Spawner) {
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
-
-    const VEC_SIZE_MANCHESTER: usize = 128usize;
-    let mut wire_state_periods = Vec::<Duration, VEC_SIZE_MANCHESTER>::new();
-    let now = Instant::now();
-    wire_state_periods.push(Instant::now().duration_since(now)).unwrap();
-    wire_state_periods.push(Instant::now().duration_since(now)).unwrap();
-    wire_state_periods.push(Instant::now().duration_since(now)).unwrap();
-
-    let _output = manchester_decode(InitLevel::Low, wire_state_periods, MANCHESTER_RESOLUTION);
 
     log::info!("Infinite emppty loop sstart");
     loop {

@@ -36,7 +36,8 @@ impl BoilerSimulation {
     }
     //  accepts OpenTherm message
     //  returns the one that would be sent in response by the Boiler
-    pub fn process(&mut self, cmd: DataOt) -> Result<DataOt, OtError> {
+    pub fn process(&mut self, msg: OpenThermMessage) -> Result<OpenThermMessage, OtError> {
+        let cmd = msg.get_data();
         let period_last_call = Instant::now().duration_since(self.last_process_call);
         self.last_process_call = Instant::now();
         // update the boiler stat
@@ -51,18 +52,26 @@ impl BoilerSimulation {
             }
         };
 
+        let corrent_type_response = match msg.get_type() {
+            MessageType::ReadData => MessageType::ReadAck,
+            MessageType::WriteData => MessageType::WriteAck,
+            _ => MessageType::InvalidData,
+        };
+
         //  Command handling:
-        match cmd {
+        let data = match cmd {
             DataOt::MasterStatus(status) => {
                 let slave_status = SlaveStatus::new(self.on_off_state, self.dwh_active, self.flame);
                 self.on_off_state = status.ch_enable;
                 self.dwh_active = status.dwh_enable;
-                Ok(DataOt::SlaveStatus(slave_status))
-            }
+                DataOt::SlaveStatus(slave_status)
+            },
             _ => {
+                log::error!("Boiler simulation: command not implemented");
                 return Err(OtError::CommandNotSupported);
             }
-        }
+        };
+        OpenThermMessage::new_from_data_ot(corrent_type_response, data)
     }
 }
 

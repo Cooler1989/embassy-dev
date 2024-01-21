@@ -29,7 +29,7 @@ use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::usb::{Driver, InterruptHandler as USBInterruptHandler};
 use embassy_time::{Duration, Instant, Timer};
 use heapless::Vec;
-use manchester::manchester_decode;
+use manchester::{manchester_decode, ManchesterIteratorAdapter};
 use opentherm_interface::{CHState, Temperature};
 use opentherm_interface::{
     DataOt, Error as OtError, MessageType, OpenThermInterface, OpenThermMessage, OpenThermMessageCode,
@@ -73,39 +73,20 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermBus<E, T> {
         }
     }
 
-    async fn transact(&mut self, message_type: MessageType, cmd: DataOt) -> Result<DataOt, OtError> {
-        let msg = OpenThermMessage::new_from_data_ot(message_type, cmd);
-        let result = match msg {
-            Ok(msg) => {
-                //  let mut count = 0u32;
-                //  for item in msg.iter() {
-                //      count += 1u32;
-                //      //  log::info!("msg[{count}] = {}", item as bool);
-                //  }
-
-                let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
-                match self.edge_trigger_drv.trigger(manchester_adapter).await {
-                    Ok(()) => {
-                        //  Successful send:
-                        //  read and return value or error as it is
-                        self.listen().await //  await response
-                    }
-                    Err(error) => {
-                        log::error!("Trigger error!");
-                        return Err(OtError::BusError);
-                    }
-                }
-            }
+    async fn transact(&mut self, message_type: MessageType, cmd: DataOt) -> Result<OpenThermMessage, OtError> {
+        let msg = OpenThermMessage::new_from_data_ot(message_type, cmd).unwrap();
+        match self.send(msg).await {
+            Ok(()) => self.listen().await,
             _ => {
-                return Err(OtError::DecodingError);
+                log::error!("Failed to send OT frame");
+                return Err(OtError::BusError);
             }
-        };
-        result
+        }
     }
 }
 
 impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for OpenThermBus<E, T> {
-    async fn listen(&mut self) -> Result<DataOt, OtError> {
+    async fn listen(&mut self) -> Result<OpenThermMessage, OtError> {
         match self
             .edge_capture_drv
             .start_capture(10 * MANCHESTER_RESOLUTION, Duration::from_secs(20)) //  a timeout for active capture
@@ -114,23 +95,38 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
             Ok((init_state, vector)) => {
                 //  caputure
                 log::info!("BS: got data of length: {}", vector.len());
+                let mut count = 0u32;
+                let mut level = InitLevel::Low;
+                for item in vector.iter() {
+                    let (letter, new_level) = match level {
+                        InitLevel::High => ('H', InitLevel::Low),
+                        InitLevel::Low => ('L', InitLevel::High),
+                    };
+                    level = new_level;
+                    //  log::info!("{}[{count}] = {}", letter, item.as_ticks());
+                    count += 1u32;
+                }
 
                 //  let received_message = OpenThermMessage::new_from_iter(ManchesterIteratorAdapter::new(vector.iter()));
                 let received_message = match manchester_decode(init_state, vector, MANCHESTER_RESOLUTION) {
-                    Ok(vec) => {
-                        if vec.len() != TOTAL_CAPTURE_OT_FRAME_SIZE {
+                    Ok(decoded_ot_msg) => {
+                        if decoded_ot_msg.len() != TOTAL_CAPTURE_OT_FRAME_SIZE {
+                            log::error!(
+                                "The OT decoded length is: {}, where expected is: {TOTAL_CAPTURE_OT_FRAME_SIZE}",
+                                decoded_ot_msg.len()
+                            );
                             return Err(OtError::InvalidLength);
                         }
                         //  Check Stop Bit
-                        if vec[0] != true {
+                        if decoded_ot_msg[0] != true {
                             log::error!("Decoding error: Stop condition is 'false'. Must be 'true'");
                             return Err(OtError::InvalidStart);
                         }
 
-                        let opentherm_frame_iterator = vec.iter().skip(1).take(CAPTURE_OT_FRAME_PAYLOAD_SIZE);
+                        let opentherm_frame_iterator = decoded_ot_msg.iter().skip(1).take(CAPTURE_OT_FRAME_PAYLOAD_SIZE);
                         let ret_msg = OpenThermMessage::new_from_iter(opentherm_frame_iterator);
 
-                        let iter = vec
+                        let iter = decoded_ot_msg
                             .iter()
                             .skip(1 + MESSAGE_DATA_VALUE_BIT_LEN + MESSAGE_DATA_ID_BIT_LEN + OT_FRAME_SKIP_SPARE);
                         let mut iter = iter.skip(MESSAGE_TYPE_BIT_LEN);
@@ -163,46 +159,44 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
         return Err(OtError::UnexpectedResult);
     }
 
+    async fn send(&mut self, msg: OpenThermMessage) -> Result<(), OtError> {
+        //  let msg = OpenThermMessage::new_from_data_ot(message_type, cmd);
+
+        //  let mut count = 0u32;
+        //  for item in msg.iter() {
+        //      count += 1u32;
+        //      //  log::info!("msg[{count}] = {}", item as bool);
+        //  }
+
+        let folded = msg.iter().enumerate().fold(0_u64, |acc, (i, bit_state)| {
+            let value = acc | ((bit_state as u64) << i);
+            value
+        });
+        log::info!("Send: 0x{:x}", folded);
+
+        let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
+        match self.edge_trigger_drv.trigger(manchester_adapter).await {
+            Ok(()) => {
+                //  Successful send:
+                //  read and return value or error as it is
+                Ok(())
+            }
+            Err(error) => {
+                log::error!("Trigger error!");
+                return Err(OtError::BusError);
+            }
+        }
+    }
+
     async fn write(&mut self, cmd: DataOt) -> Result<(), OtError> {
         let _ = self.transact(MessageType::WriteData, cmd).await?;
         Ok(())
     }
     async fn read(&mut self, cmd: DataOt) -> Result<DataOt, OtError> {
-        self.transact(MessageType::ReadData, cmd).await
-    }
-}
-
-struct ManchesterIteratorAdapter<I: Iterator<Item = bool>> {
-    iterator: I,
-    next_bit: Option<bool>,
-}
-
-impl<I: Iterator<Item = bool>> ManchesterIteratorAdapter<I> {
-    fn new(iterator_arg: I) -> Self {
-        Self {
-            iterator: iterator_arg,
-            next_bit: None,
+        match self.transact(MessageType::ReadData, cmd).await {
+            Ok(ot) => Ok(ot.get_data()),
+            Err(er) => { return Err(er); }
         }
-    }
-}
-
-impl<I: Iterator<Item = bool>> Iterator for ManchesterIteratorAdapter<I> {
-    type Item = bool;
-    fn next(&mut self) -> Option<Self::Item> {
-        let ret = match self.next_bit {
-            None => match self.iterator.next() {
-                None => None, //  depleted
-                Some(bit) => {
-                    self.next_bit = Some(bit);
-                    Some(!bit)
-                }
-            },
-            Some(bit) => {
-                self.next_bit = None;
-                Some(bit)
-            }
-        };
-        ret
     }
 }
 
@@ -219,23 +213,36 @@ struct RpEdgeTrigger<'d, OutPin: Pin> {
 //      count
 //  }
 
+//  _____|''|_____|''|__|''|__    ___|''|__|'''''|__|''|___   //  0x200000003
+//  -----|  1  |  0  |  0  |      |  0  |  0  |  1  |  1  |
 impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin> {
     async fn trigger(&mut self, iterator: impl Iterator<Item = bool>) -> Result<(), TriggerError> {
         let period = MANCHESTER_RESOLUTION;
         self.output_pin.set_low(); //  generate idle state:
-        Timer::after(period).await; //  await one period in idle state
+        Timer::after(3 * period).await; //  await one period in idle state
 
         //  This loop already handles the manchester encoding:
         let mut count = 0u32;
+        //  use timer with predefined times:
+        //  pub fn at(expires_at: Instant) -> Self {
+        let mut next_change_ts = Instant::now();
         for item in iterator {
-            // iterator.for_each( async move |item| {
             if item == true {
                 self.output_pin.set_high();
             } else {
                 self.output_pin.set_low();
             }
-            Timer::after(period).await;
+            let set_at = Instant::now();
+            log::info!("Out[{count}]: {} set at: {}_t", item as bool, set_at.as_ticks());
             count += 1u32;
+            next_change_ts = next_change_ts + period;
+            let now = Instant::now();
+            if next_change_ts > now {
+                Timer::after(next_change_ts - now).await;
+            } else {
+                log::warn!("time off by: {}", (now - next_change_ts).as_ticks());
+            }
+            //  Timer::at(next_change_ts);
         }
         log::info!("Edge Trigger sent count: {count}");
 
@@ -310,9 +317,11 @@ impl<'d, InPin: Pin, const N: usize> EdgeCaptureInterface<N> for RpEdgeCapture<'
                 Err(_) => {
                     //  log::warn!("Capture timeout!");
                     //  put last timeouted value into the vector
-                    timestamps
-                        .insert(0, Instant::now().duration_since(capture_timestamp))
-                        .unwrap(); //  here handle error
+                    RpEdgeCapture::<'d, InPin, N>::insert(
+                        &mut timestamps,
+                        Instant::now().duration_since(capture_timestamp),
+                    )
+                    .unwrap(); //  here handle error
                     log::info!("Break capture with timeout: {}", timeout);
                     break;
                 } //  TODO: check if the error was timeout
@@ -320,7 +329,8 @@ impl<'d, InPin: Pin, const N: usize> EdgeCaptureInterface<N> for RpEdgeCapture<'
 
             let temporary_timestamp = Instant::now();
             let ms = temporary_timestamp.duration_since(capture_timestamp);
-            timestamps.insert(0, ms).unwrap(); //  here handle error
+            RpEdgeCapture::<'d, InPin, N>::insert(&mut timestamps, ms).unwrap();
+            //  timestamps.push(ms).unwrap(); //  here handle error
             capture_timestamp = temporary_timestamp;
         }
 
@@ -334,6 +344,11 @@ where
 {
     fn new(input_pin: Input<'d, InPin>) -> Self {
         Self { input_pin }
+    }
+    #[inline]
+    fn insert(vector: &mut Vec<Duration, N>, period: Duration) -> Result<(), Duration> {
+        //  vector.insert(0, period)
+        vector.push(period)
     }
 }
 
@@ -378,11 +393,11 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_outpu
         };
 
         //  Send response:
-        Timer::after_secs(3).await;
+        Timer::after_secs(2).await;
 
         match response {
             Some(cmd) => {
-                open_therm_bus.write(cmd).await.unwrap();
+                open_therm_bus.send(cmd).await.unwrap();
             }
             None => {
                 ();

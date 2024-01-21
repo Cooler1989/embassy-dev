@@ -89,8 +89,15 @@ impl<D: OpenThermInterface> BoilerControl<D> {
     // turn into await / use await driver for reading/writing OpenTherm Bus:
     pub async fn process(&mut self) -> Result<(), OtError> {
         let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily always on.
-        if let Ok(slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
-            //  sent was correct
+        if let Ok(expected_slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
+            //  sent was correct, wait receive now:
+            let _response = match self.device.listen().await {
+                Ok(response) => {
+                },
+                _ => {
+                    log::error!("Boiler::process(): Response to MasterStatus is not valid");
+                }
+            };
         } else {
             log::error!("Boiler failed to report Status!");
         }

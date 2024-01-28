@@ -98,38 +98,3 @@ impl BoilerSimulation {
         OpenThermMessage::new_from_data_ot(correct_type_response, data)
     }
 }
-
-//  impl OpenThermInterface for BoilerSimulation {
-//      async fn listen(&mut self) -> Result<DataOt, OtError> {
-//          //  here comes listening
-//          todo!()
-//      }
-//      async fn write(&mut self, cmd: DataOt) -> Result<(), OtError> {
-//          let response = match cmd {
-//              DataOt::MasterStatus(status) => {}
-//              DataOt::ControlSetpoint(setpoint) => {}
-//              DataOt::BoilerTemperature(temperature) => {
-//                  self.setpoint = temperature;
-//              }
-//              _ => {
-//                  todo!()
-//              }
-//          };
-//
-//          Ok(())
-//      }
-//
-//      async fn read(&mut self, cmd: DataOt) -> Result<u32, OtError> {
-//          match cmd {
-//              DataOt::MasterStatus(status) => {
-//                  let msg = OpenThermMessage::new(0x00u32);
-//              }
-//              DataOt::ControlSetpoint(temperature) => {}
-//              DataOt::BoilerTemperature(temperature) => {
-//                  //  self.setpoint;
-//              }
-//              _ => todo!()
-//          }
-//          Ok(0u32)
-//      }
-//  }

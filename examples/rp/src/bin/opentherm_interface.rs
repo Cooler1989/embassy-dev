@@ -19,7 +19,7 @@ pub const MESSAGE_DATA_ID_BIT_LEN: usize = 8_usize;
 pub const MESSAGE_TYPE_BIT_LEN: usize = 3_usize;
 pub const OT_FRAME_SKIP_SPARE: usize = 4_usize;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Error {
     GenericError,
     InvalidData,
@@ -35,7 +35,7 @@ pub enum Error {
 }
 
 #[repr(u8)]
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum MessageType {
     //  master to slave messages
     ReadData = 0x0,
@@ -73,7 +73,7 @@ impl TryFrom<u8> for MessageType {
 trait OpenThermReadRequest {}
 trait OpenThermWriteRequest {}
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum CHState {
     Enable(bool),
 }
@@ -84,7 +84,7 @@ impl Default for CHState {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum Fault {
     Value(bool),
 }
@@ -95,7 +95,7 @@ impl Default for Fault {
     }
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum DWHState {
     Enable(bool),
 }
@@ -106,7 +106,7 @@ impl Default for DWHState {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum FlameState {
     Active(bool),
 }
@@ -138,7 +138,7 @@ impl From<MasterStatus> for Flag8 {
 //  f8.8  signed fixed point value : 1 sign bit, 7 integer bit, 8 fractional bits (two’s compliment ie. the
 //  LSB of the 16bit binary number represents 1/256th of a unit).
 enum Float8_8 {
-    Signed(i8),
+    Signed(i16),
     //  TODO:
     //  fractional(u8),
 }
@@ -161,7 +161,7 @@ impl From<Temperature> for u16 {
 }
 
 // implement From / to flag8
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, Debug)]
 pub struct MasterStatus {
     pub ch_enable: CHState,
     pub dwh_enable: DWHState,
@@ -176,7 +176,7 @@ enum MasterStatusEnumeration {
     Depleted,
 }
 
-//  TODo: rmeove pub
+//  TODO: remove pub
 pub struct MasterStatusIterator<'a> {
     enumeration: MasterStatusEnumeration,
     status: &'a MasterStatus,
@@ -236,7 +236,7 @@ impl MasterStatus {
     }
 }
 
-#[derive(Default, Copy, Clone)]
+#[derive(Default, Copy, Clone, Debug)]
 pub struct SlaveStatus {
     fault: Fault,
     ch_active: CHState,
@@ -266,16 +266,80 @@ impl SlaveStatus {
             flame_active: flame,
         }
     }
+    pub fn iter(&self) -> SlaveStatusIterator {
+        SlaveStatusIterator {
+            enumeration: SlaveStatusEnumeration::Fault,
+            status: self,
+        }
+    }
+}
+enum SlaveStatusEnumeration {
+    Fault,
+    ChEnable,
+    DwhEnable,
+    Flame,
+    Ignore(u8),
+    Depleted,
+}
+
+const SLAVE_STATUS_IGNORE_COUNT: u8 = 4;
+
+//  TODO: remove pub
+pub struct SlaveStatusIterator<'a> {
+    enumeration: SlaveStatusEnumeration,
+    status: &'a SlaveStatus,
+}
+
+impl<'a> Iterator for SlaveStatusIterator<'a> {
+    type Item = bool;
+    fn next(&mut self) -> Option<Self::Item> {
+        let (next, ret_value) = match self.enumeration {
+            SlaveStatusEnumeration::Fault => {
+                let value = match self.status.fault {
+                    Fault::Value(val) => val,
+                };
+                (SlaveStatusEnumeration::ChEnable, Some(value))
+            }
+            SlaveStatusEnumeration::ChEnable => {
+                let value = match self.status.ch_active {
+                    CHState::Enable(val) => val,
+                };
+                (SlaveStatusEnumeration::DwhEnable, Some(value))
+            }
+            SlaveStatusEnumeration::DwhEnable => {
+                let value = match self.status.dwh_active {
+                    DWHState::Enable(val) => val,
+                };
+                (SlaveStatusEnumeration::Flame, Some(value))
+            }
+            SlaveStatusEnumeration::Flame => {
+                let value = match self.status.flame_active {
+                    FlameState::Active(val) => val,
+                };
+                (SlaveStatusEnumeration::Ignore(0), Some(value))
+            }
+            SlaveStatusEnumeration::Ignore(count) => {
+                if count < SLAVE_STATUS_IGNORE_COUNT {
+                    (SlaveStatusEnumeration::Ignore(count + 1), Some(false))
+                } else {
+                    (SlaveStatusEnumeration::Depleted, None)
+                }
+            }
+            SlaveStatusEnumeration::Depleted => (SlaveStatusEnumeration::Depleted, None),
+        };
+        self.enumeration = next;
+        ret_value
+    }
 }
 
 #[repr(u8)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum Percent {
     Value(u8),
 }
 
 #[repr(u8)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum OpenThermMessageCode {
     Status = 0x00,
     ControlSetpoint = 0x01,
@@ -285,7 +349,7 @@ pub enum OpenThermMessageCode {
     Unrecognized = 0xFF,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum DataOt {
     MasterStatus(MasterStatus), //  for write
     SlaveStatus(SlaveStatus),   //  for read
@@ -362,6 +426,10 @@ impl From<DataOt> for u16 {
                 let value = acc | ((bit_state as u16) << (i + SHIFT_SKIP_SLAVE_STATUS));
                 value
             }),
+            DataOt::SlaveStatus(status) => status.iter().enumerate().fold(0_u8, |acc, (i, bit_state)| {
+                let value = acc | ((bit_state as u8) << i);
+                value
+            }) as u16,
             DataOt::ControlSetpoint(temperature)
             | DataOt::BoilerTemperature(temperature)
             | DataOt::DWHTemperature(temperature) => temperature.into(),
@@ -415,6 +483,7 @@ impl TryFrom<u8> for OpenThermMessageCode {
 //      fn discriminant(&self) -> u8 {
 //      }
 
+#[derive(Copy, Clone, Debug)]
 pub struct OpenThermMessage {
     // start bit
     // parity bit
@@ -429,6 +498,7 @@ pub struct OpenThermMessage {
 
 //  TODO: Implement iterator: https://dev.to/wrongbyte/implementing-iterator-and-intoiterator-in-rust-3nio
 //?
+#[derive(Debug)]
 enum OpenThermIteratorState {
     StartBit,
     Parity,
@@ -521,13 +591,13 @@ impl OpenThermMessage {
     }
     fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {
         let sign = iterator.clone().next().unwrap();
-        let data_value = iterator.skip(1).enumerate().fold(0i8, |acc, (i, &bit_state)| {
-            let value = acc | ((bit_state as i8) << i);
+        let data_value = iterator.skip(1).enumerate().fold(0_i16, |acc, (i, &bit_state)| {
+            let value = acc | ((bit_state as i16) << i);
             value
         });
         //  return:
         match *sign {
-            true => Ok(Float8_8::Signed(-1i8 * data_value)),
+            true => Ok(Float8_8::Signed(-1i16 * data_value)),
             false => Ok(Float8_8::Signed(data_value)),
         }
     }
@@ -540,7 +610,38 @@ impl OpenThermMessage {
         return self.msg_type.clone();
     }
 
-    pub fn new_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Self, Error> {
+    fn decode_data_ot<'a>(
+        data_id: OpenThermMessageCode,
+        msg_type: MessageType,
+        data_value_iterator: impl Iterator<Item = &'a bool> + Clone,
+    ) -> Result<DataOt, Error> {
+        let data_float8_8 = Self::float8_8_from_iter(data_value_iterator.clone()).unwrap();
+        match data_id {
+            OpenThermMessageCode::Status => match msg_type {
+                MessageType::ReadAck => {
+                    //  iterate flag8 into bool flags
+                    Ok(DataOt::SlaveStatus(SlaveStatus::new_from_iter(data_value_iterator)?))
+                }
+                MessageType::ReadData => {
+                    //  iterate flag8 into bool flags
+                    Ok(DataOt::MasterStatus(MasterStatus::new_from_iter(data_value_iterator)?))
+                }
+                _ => {
+                    return Err(Error::DecodingError);
+                }
+            },
+            //  fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {
+            OpenThermMessageCode::ControlSetpoint => Ok(DataOt::ControlSetpoint(data_float8_8.into())), // f8.8 TODO: use u3
+            // to map float
+            OpenThermMessageCode::BoilerTemperature => Ok(DataOt::BoilerTemperature(data_float8_8.into())),
+            _ => {
+                log::error!("Unrecognized DataId");
+                return Err(Error::UnknownDataId);
+            }
+        }
+    }
+
+    pub fn try_new_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Self, Error> {
         let folded =
             iterator
                 .clone()
@@ -558,7 +659,6 @@ impl OpenThermMessage {
         }
 
         let data_value_iterator = iterator.clone().take(MESSAGE_DATA_VALUE_BIT_LEN);
-        let data_float8_8 = Self::float8_8_from_iter(data_value_iterator.clone()).unwrap();
         let data_value = data_value_iterator
             .clone()
             .enumerate()
@@ -611,30 +711,7 @@ impl OpenThermMessage {
         let parity = iter.next();
 
         //  Deconding based on other types
-        let data_id = match data_id {
-            OpenThermMessageCode::Status => match msg_type {
-                MessageType::ReadAck => {
-                    todo!();
-                    DataOt::SlaveStatus(SlaveStatus::new_from_iter(data_value_iterator)?)
-                }
-                MessageType::ReadData => {
-                    //  iterate flag8 into bool flags
-                    //  DataOt::MasterStatus(Default::default())
-                    DataOt::MasterStatus(MasterStatus::new_from_iter(data_value_iterator)?)
-                }
-                _ => {
-                    return Err(Error::DecodingError);
-                }
-            },
-            //  fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {
-            OpenThermMessageCode::ControlSetpoint => DataOt::ControlSetpoint(data_float8_8.into()), // f8.8 TODO: use u3
-            // to map float
-            OpenThermMessageCode::BoilerTemperature => DataOt::BoilerTemperature(data_float8_8.into()),
-            _ => {
-                log::error!("Unrecognized DataId");
-                return Err(Error::UnknownDataId);
-            }
-        };
+        let data_id = Self::decode_data_ot(data_id, msg_type, data_value_iterator)?;
 
         Ok(Self {
             msg_type: msg_type,

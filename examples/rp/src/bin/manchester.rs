@@ -27,14 +27,48 @@ pub enum CodingError {
 //  Assumptions: first edge is always the transition from idle state and it marks start of the
 //  bit.
 
+#[derive(Debug)]
+pub enum DecodingDebugEvent {
+    BeforeStart,
+    StartOk,
+    DoublePulse,
+    ShortPulse,
+    ComplementaryShortPulse,
+    ComplementaryLongPulseFinish,
+    ComplementaryLongPulseError,
+    ComplementaryPulseOk,
+    HalfComplementaryStrip,
+    HalfPeriod, //  pulling in half-period at the beginning of the while loop
+}
+
+#[derive(Debug)]
+pub struct DataDecodingDebug {
+    pub duration: Duration,
+    pub event: DecodingDebugEvent,
+    pub count: usize,
+}
+
+impl DataDecodingDebug {
+    pub fn print_debug_info<const N: usize>(vec: Vec<DataDecodingDebug, N>) {
+        for item in vec {
+            match item {
+                DataDecodingDebug { duration, event, count } => {
+                    log::info!("ManEvent[{count}]: evt:{:?}, duration: {}", event, duration.as_ticks());
+                }
+            }
+        }
+    }
+}
+
 //  TODO: Prepare data first - remove first and last long periods
 pub fn manchester_decode<const N: usize /*Vec max size*/>(
     level: InitLevel,
     mut wire_state_periods: Vec<Duration, N>,
     resolution: Duration, /*period duration which specifies smalles amount of time the line can state in one state*/
-) -> Result<Vec<bool, N>, CodingError> {
-    let mut count = 0_i32;
+) -> Result<Vec<bool, N>, (CodingError, Vec<DataDecodingDebug, N>)> {
+    let mut count = 0_usize;
     let mut output = Vec::<bool, N>::new();
+    let mut err_output = Vec::<DataDecodingDebug, N>::new();
     log::info!(
         "Start manchester decoding vec of length {} elements with resolution: {} ticks",
         wire_state_periods.len(),
@@ -44,17 +78,25 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
     //  capture should start before first relevant level transition
     //  TODO: possibly do it upstream:
     if wire_state_periods.is_empty() {
-        return Err(CodingError::WrongInput);
+        return Err((CodingError::WrongInput, err_output));
     }
-    let ignore_first_period = wire_state_periods.pop().unwrap();
-    log::info!(
-        "Ignoring the first period with {} ticks or {} periods",
-        ignore_first_period.as_ticks(),
-        ignore_first_period.as_ticks() / resolution.as_ticks()
-    );
+    if let Some(ignore_first_period) = wire_state_periods.pop() {
+        log::info!(
+            "Ignoring the first period with {} ticks or {} periods",
+            ignore_first_period.as_ticks(),
+            ignore_first_period.as_ticks() / resolution.as_ticks()
+        );
+        err_output
+            .push(DataDecodingDebug {
+                duration: ignore_first_period,
+                event: DecodingDebugEvent::BeforeStart,
+                count: count,
+            })
+            .unwrap();
+    }
     //  Return if initial level is not idle level
     if level != InitLevel::Low {
-        return Err(CodingError::InitialLevelError);
+        return Err((CodingError::InitialLevelError, err_output));
     }
 
     //  Initial level is very important as it determines all other transitions
@@ -72,12 +114,12 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
                     "First valid period should be equal to one unit period, but it is: {} ticks",
                     pop_period.as_ticks()
                 );
-                return Err(CodingError::PeriodEncodingError);
+                return Err((CodingError::PeriodEncodingError, err_output));
             }
         }
         _ => {
             log::error!("Not even one valid period found in the input");
-            return Err(CodingError::PeriodEncodingError);
+            return Err((CodingError::PeriodEncodingError, err_output));
         }
     }
     output.push(true).unwrap(); //  First 'one' bit
@@ -86,7 +128,14 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
     //  on the next period detects next bit level. If needed it pops next periods until it lands
     //  in the middle of just determined bit.
     while let Some(pop_period) = wire_state_periods.pop() {
-        log::info!("per for in_0[{count}] = {}", pop_period.as_ticks());
+        //  log::info!("per for in_0[{count}] = {}", pop_period.as_ticks());
+        err_output
+            .push(DataDecodingDebug {
+                duration: pop_period,
+                event: DecodingDebugEvent::HalfPeriod,
+                count: count,
+            })
+            .unwrap();
         //  Check if the period is of value around of the resolution:
         if (HUNDRED_PERCENT * pop_period > (HUNDRED_PERCENT - TRESHOLD_PERCENT_LEVEL) * resolution)
             && (HUNDRED_PERCENT * pop_period < (HUNDRED_PERCENT + TRESHOLD_PERCENT_LEVEL) * resolution)
@@ -117,10 +166,17 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
                         //  would cause exact period and additional random one after that.
                         match wire_state_periods.is_empty() {
                             true => {
-                                log::info!(
-                                    "per for in_half[{count}] = {} => X (last long pulse)",
-                                    pop_period.as_ticks()
-                                );
+                                err_output
+                                    .push(DataDecodingDebug {
+                                        duration: pop_period,
+                                        event: DecodingDebugEvent::ComplementaryLongPulseFinish,
+                                        count: count,
+                                    })
+                                    .unwrap();
+                                //  log::info!(
+                                //      "per for in_half[{count}] = {} => X (last long pulse)",
+                                //      pop_period.as_ticks()
+                                //  );
                                 break;
                             }
                             false => {
@@ -128,23 +184,44 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
                                     "Long Complementary half-period detected but the vector has still: {} elements",
                                     wire_state_periods.len()
                                 );
-                                return Err(CodingError::FinishExpectedError);
+                                err_output
+                                    .push(DataDecodingDebug {
+                                        duration: pop_period,
+                                        event: DecodingDebugEvent::ComplementaryLongPulseError,
+                                        count: count,
+                                    })
+                                    .unwrap();
+                                return Err((CodingError::FinishExpectedError, err_output));
                             }
                         }
                     } else if HUNDRED_PERCENT * pop_period < (HUNDRED_PERCENT - TRESHOLD_PERCENT_LEVEL) * resolution {
-                        log::info!(
-                            "per for in_half[{count}] = {} => X (short pulse)",
-                            pop_period.as_ticks()
-                        );
+                        err_output
+                            .push(DataDecodingDebug {
+                                duration: pop_period,
+                                event: DecodingDebugEvent::ComplementaryShortPulse,
+                                count: count,
+                            })
+                            .unwrap();
+                        //  log::info!(
+                        //      "per for in_half[{count}] = {} => X (short pulse)",
+                        //      pop_period.as_ticks()
+                        //  );
                         //  because we expect at least a finished cycle
-                        return Err(CodingError::PeriodEncodingError);
+                        return Err((CodingError::PeriodEncodingError, err_output));
                     } else {
                         //  else: the length is withing range -> push & continue
                         output.push(output_candidate).unwrap(); //  handle error
-                        log::info!(
-                            "per for in_half[{count}] = {} => '{output_candidate}'",
-                            pop_period.as_ticks()
-                        );
+                        err_output
+                            .push(DataDecodingDebug {
+                                duration: pop_period,
+                                event: DecodingDebugEvent::ComplementaryPulseOk,
+                                count: count,
+                            })
+                            .unwrap();
+                        //  log::info!(
+                        //      "per for in_half[{count}] = {} => '{output_candidate}'",
+                        //      pop_period.as_ticks()
+                        //  );
                     }
                 }
                 _ => {
@@ -162,7 +239,7 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
             //            b-----e   begin/end for the period
             //          __|'''''|__ manchester '10'
             //          ''|_____|'' manchester '01'
-            //          aaaaa|bbbbb a - previous, b - current
+            //          aaaaa|bbbbb a - previous, b - current | loop iteration
             //          =============================================
             let (replace_level, new_level) = match level {
                 InitLevel::Low => {
@@ -173,10 +250,18 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
                 }
             };
             level = replace_level;
+            //  log::info!("per for in_full[{count}] = {} (double pulse)", pop_period.as_ticks());
+            err_output
+                .push(DataDecodingDebug {
+                    duration: pop_period,
+                    event: DecodingDebugEvent::DoublePulse,
+                    count: count,
+                })
+                .unwrap();
             match output.push(new_level) {
                 Err(_returned_element) => {
                     //  returns back elemeent that was not possible
-                    return Err(CodingError::NoSpaceAvailable);
+                    return Err((CodingError::NoSpaceAvailable, err_output));
                 }
                 _ => { // correct
                 }
@@ -187,7 +272,7 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
                 break;
             } else {
                 //  Half way through the bit there is non-conforming period length:
-                return Err(CodingError::PeriodEncodingError);
+                return Err((CodingError::PeriodEncodingError, err_output));
             }
         }
         count += 1;

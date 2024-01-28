@@ -55,7 +55,7 @@ impl<D: OpenThermInterface> BoilerControl<D> {
         }
     }
 
-    fn set_point_control_internal(&mut self) {
+    fn set_point_control_internal(&mut self) -> Temperature {
         let temp_to_send = match self.state {
             BoilerStatus::Uninitialized => MIN_TEMPERATURE_SETPOINT,
             BoilerStatus::Idle | BoilerStatus::BurnerModulation => self.setpoint,
@@ -66,8 +66,8 @@ impl<D: OpenThermInterface> BoilerControl<D> {
         } else {
             SETPOINT_MAX_TEMPERATURE_DEFAULT
         };
-
-        self.device.write(DataOt::BoilerTemperature(temp_to_send));
+        temp_to_send
+        //  self.device.write(DataOt::BoilerTemperature(temp_to_send));
     }
 
     fn state_transition(&mut self) {
@@ -88,51 +88,79 @@ impl<D: OpenThermInterface> BoilerControl<D> {
     // still TODO
     // turn into await / use await driver for reading/writing OpenTherm Bus:
     pub async fn process(&mut self) -> Result<(), OtError> {
-        let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily DWH is always on.
-        let iter_fold = master_status.iter().enumerate().fold(0_u32, |acc, (i, bit_state)| {
-            let value = acc | ((bit_state as u32) << i);
-            value
-        });
-        log::info!("boiler controller Master status fold: {:x}", iter_fold);
-        if let Ok(expected_slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
-            //  sent was correct, wait receive now:
-            let _response = match self.device.listen().await {
-                Ok(response) => {}
-                _ => {
-                    log::error!("Boiler::process(): Response to MasterStatus is not valid");
+        //  let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily DWH is always on.
+        //  let iter_fold = master_status.iter().enumerate().fold(0_u32, |acc, (i, bit_state)| {
+        //      let value = acc | ((bit_state as u32) << i);
+        //      value
+        //  });
+        //  log::info!("boiler controller Master status fold: 0x{:x}", iter_fold);
+        //  if let Ok(expected_slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
+        //      //  sent was correct, wait receive now:
+        //      let _response = match self.device.listen().await {
+        //          Ok(response) => {}
+        //          _ => {
+        //              log::error!("Boiler::process(): Response to MasterStatus is not valid");
+        //          }
+        //      };
+        //  } else {
+        //      log::error!("Boiler failed to report Status!");
+        //  }
+        //////////////////////////////////////////////////////////////////////////
+
+        self.state_transition(); //  check timer expiration and realize
+                                 //  BoilerStatus::BurnerStart->BurnerModulation transition
+        let new_state = match self.communication_state {
+            CommunicationState::StatusExchange => {
+                //  log::info("Boiler p
+                let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily DWH is always on.
+                let iter_fold = master_status.iter().enumerate().fold(0_u32, |acc, (i, bit_state)| {
+                    let value = acc | ((bit_state as u32) << i);
+                    value
+                });
+                log::info!("boiler controller Master status fold: 0x{:x}", iter_fold);
+
+                log::info!("Boiler Controller sends data: {:?}", master_status);
+                if let Ok(expected_slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
+                    log::info!("Boiler Controller got back data: {:?}", expected_slave_status);
+                    // expected_slave_status
+
+                    //  sent was correct
+                    //  let _response = match self.device.listen().await {
+                    //      Ok(response) => {}
+                    //      _ => {
+                    //          log::error!("Boiler::process(): Response to MasterStatus is not valid");
+                    //      }
+                    //  };
+                } else {
+                    log::error!("Boiler failed to report Status!");
                 }
-            };
-        } else {
-            log::error!("Boiler failed to report Status!");
-        }
-        //
-        //  self.state_transition(); //  check timer expiration and realize
-        //                           //  BoilerStatus::BurnerStart->BurnerModulation transition
-        //  let new_state = match self.communication_state {
-        //      CommunicationState::StatusExchange => {
-        //          //  log::info("Boiler p
-        //          let master_status = MasterStatus::new(self.maintain_ch_state, DWHState::Enable(true)); //  temporarily always on.
-        //          if let Ok(slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
-        //              //  sent was correct
-        //          } else {
-        //              log::error!("Boiler failed to report Status!");
-        //          }
-        //          CommunicationState::Control
-        //      }
-        //      CommunicationState::Control => {
-        //          self.set_point_control_internal();
-        //          CommunicationState::Diagnostics
-        //      }
-        //      CommunicationState::Diagnostics => {
-        //          if let Ok(value) = self.device.read(DataOt::BoilerTemperature(Default::default())).await {
-        //              value; //  compose diagnostics
-        //          } else {
-        //              log::error!("Boiler response failure");
-        //          }
-        //          CommunicationState::StatusExchange
-        //      }
-        //  };
-        //  self.communication_state = new_state;
+                CommunicationState::Control
+            }
+            CommunicationState::Control => {
+                let temp_to_send = self.set_point_control_internal();
+                if let Ok(value) = self.device.write(DataOt::BoilerTemperature(temp_to_send)).await {
+                    //  self.device.read(DataOt::Setpoint(Default::default())).await {
+                    log::info!("Boiler setpoint sent");
+                } else {
+                    log::error!("Boiler set setpoint failure");
+                }
+                //  self.device.write(DataOt::BoilerTemperature(temp_to_send));
+                CommunicationState::Diagnostics
+            }
+            CommunicationState::Diagnostics => {
+                if let Ok(value) = self.device.read(DataOt::BoilerTemperature(Default::default())).await {
+                    if let DataOt::BoilerTemperature(value) = value {
+                        if let Temperature::Celsius(value) = value {
+                            log::info!("Boiler temp read: {}", value);
+                        }
+                    }
+                } else {
+                    log::error!("Boiler response failure");
+                }
+                CommunicationState::StatusExchange
+            }
+        };
+        self.communication_state = new_state;
         Ok(())
     }
     //  Always or on demand / or combined?

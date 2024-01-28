@@ -110,7 +110,6 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
                 //              ''|__|''|__ manchester '00'
                 //              aaaaa|bbbbb a - previous, b - current
                 Some(pop_period) => {
-                    log::info!("per for in_half[{count}] = {}", pop_period.as_ticks());
                     //  check if period is of correct value of around one resolution:
                     if HUNDRED_PERCENT * pop_period > (HUNDRED_PERCENT + TRESHOLD_PERCENT_LEVEL) * resolution {
                         //  if the period is longer it suggest it is the last period
@@ -118,6 +117,10 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
                         //  would cause exact period and additional random one after that.
                         match wire_state_periods.is_empty() {
                             true => {
+                                log::info!(
+                                    "per for in_half[{count}] = {} => X (last long pulse)",
+                                    pop_period.as_ticks()
+                                );
                                 break;
                             }
                             false => {
@@ -129,11 +132,19 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
                             }
                         }
                     } else if HUNDRED_PERCENT * pop_period < (HUNDRED_PERCENT - TRESHOLD_PERCENT_LEVEL) * resolution {
+                        log::info!(
+                            "per for in_half[{count}] = {} => X (short pulse)",
+                            pop_period.as_ticks()
+                        );
                         //  because we expect at least a finished cycle
                         return Err(CodingError::PeriodEncodingError);
                     } else {
                         //  else: the length is withing range -> push & continue
                         output.push(output_candidate).unwrap(); //  handle error
+                        log::info!(
+                            "per for in_half[{count}] = {} => '{output_candidate}'",
+                            pop_period.as_ticks()
+                        );
                     }
                 }
                 _ => {

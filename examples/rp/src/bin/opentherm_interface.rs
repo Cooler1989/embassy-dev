@@ -31,10 +31,11 @@ pub enum Error {
     ParityError,
     CommandNotSupported,
     UnexpectedResult,
+    IncompatibleTypeData,
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum MessageType {
     //  master to slave messages
     ReadData = 0x0,
@@ -72,7 +73,7 @@ impl TryFrom<u8> for MessageType {
 trait OpenThermReadRequest {}
 trait OpenThermWriteRequest {}
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum CHState {
     Enable(bool),
 }
@@ -94,7 +95,7 @@ impl Default for Fault {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum DWHState {
     Enable(bool),
 }
@@ -148,11 +149,67 @@ impl From<Float8_8> for Temperature {
     }
 }
 
+impl From<Temperature> for u16 {
+    fn from(item: Temperature) -> Self {
+        match item {
+            Temperature::Celsius(data) => data as u16,
+        }
+    }
+    //  pub enum Temperature {
+    //      Celsius(i16),
+    //  }
+}
+
 // implement From / to flag8
 #[derive(Copy, Clone, Default)]
 pub struct MasterStatus {
     pub ch_enable: CHState,
     pub dwh_enable: DWHState,
+}
+
+const MASTER_STATUS_IGNORE_COUNT: u8 = 6;
+
+enum MasterStatusEnumeration {
+    ChEnable,
+    DwhEnable,
+    Ignore(u8),
+    Depleted,
+}
+
+//  TODo: rmeove pub
+pub struct MasterStatusIterator<'a> {
+    enumeration: MasterStatusEnumeration,
+    status: &'a MasterStatus,
+}
+
+impl<'a> Iterator for MasterStatusIterator<'a> {
+    type Item = bool;
+    fn next(&mut self) -> Option<Self::Item> {
+        let (next, ret_value) = match self.enumeration {
+            MasterStatusEnumeration::ChEnable => {
+                let value = match self.status.ch_enable {
+                    CHState::Enable(val) => val,
+                };
+                (MasterStatusEnumeration::DwhEnable, Some(value))
+            }
+            MasterStatusEnumeration::DwhEnable => {
+                let value = match self.status.dwh_enable {
+                    DWHState::Enable(val) => val,
+                };
+                (MasterStatusEnumeration::Ignore(0), Some(value))
+            }
+            MasterStatusEnumeration::Ignore(count) => {
+                if count < MASTER_STATUS_IGNORE_COUNT {
+                    (MasterStatusEnumeration::Ignore(count + 1), Some(false))
+                } else {
+                    (MasterStatusEnumeration::Depleted, None)
+                }
+            }
+            MasterStatusEnumeration::Depleted => (MasterStatusEnumeration::Depleted, None),
+        };
+        self.enumeration = next;
+        ret_value
+    }
 }
 
 impl MasterStatus {
@@ -169,6 +226,12 @@ impl MasterStatus {
         Self {
             ch_enable: ch,
             dwh_enable: dwh,
+        }
+    }
+    pub fn iter(&self) -> MasterStatusIterator {
+        MasterStatusIterator {
+            enumeration: MasterStatusEnumeration::ChEnable,
+            status: self,
         }
     }
 }
@@ -207,10 +270,18 @@ impl SlaveStatus {
 
 #[repr(u8)]
 #[derive(Copy, Clone)]
+pub enum Percent {
+    Value(u8),
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone)]
 pub enum OpenThermMessageCode {
     Status = 0x00,
     ControlSetpoint = 0x01,
+    RelativeModulationLevel = 0x17,
     BoilerTemperature = 0x25,
+    DWHTemperature = 0x26,
     Unrecognized = 0xFF,
 }
 
@@ -219,7 +290,111 @@ pub enum DataOt {
     MasterStatus(MasterStatus), //  for write
     SlaveStatus(SlaveStatus),   //  for read
     ControlSetpoint(Temperature),
+    RelativeModulationLevel(Percent),
     BoilerTemperature(Temperature),
+    DWHTemperature(Temperature),
+}
+
+impl DataOt {
+    pub fn iter(&self) -> Result<DataOtIterator, Error> {
+        //  OpenThermMessageIterator {
+        //      message: self,
+        //      state: OpenThermIteratorState::StartBit,
+        //      parity_count: 0u32,
+        //      data_value: 0x0,
+        //  }
+        let data_v = match self {
+            DataOt::MasterStatus(data) => 0_u16,
+            _ => {
+                return Err(Error::InvalidData);
+            }
+        };
+
+        //  let next_value = match self.data {
+        //      DataOt::MasterStatus(status) => {
+        //          //  self.message.data_id.iter();
+        //      }
+        //  };
+
+        Ok(DataOtIterator {
+            data: self,
+            index: Some(0),
+            data_value: data_v,
+        })
+    }
+}
+
+//  impl TryFrom<DataOt> for u16 {
+//      type Error = ();
+//      fn try_from(item: DataOt) -> Result<Self, Self::Error> {
+//          match item {
+//              DataOt::MasterStatus(status) => {
+//              },
+//              DataOt::BoilerTemperature(temperature) => {
+//              },
+//              _ => Err(()),
+//          }
+//      }
+//  }
+
+//  use core::num::Unsigned;
+use fixed::types::extra::Unsigned;
+
+pub fn fold_unsigned<
+    T: Unsigned
+        + core::ops::Shl<usize>
+        + core::ops::BitOr<<T as core::ops::Shl<usize>>::Output, Output = T>
+        + core::convert::From<bool>,
+>(
+    iteratable: impl Iterator<Item = bool>,
+) -> T {
+    iteratable.enumerate().fold(Default::default(), |acc, (i, bit_state)| {
+        let value = acc | ((Into::<T>::into(bit_state)) << i);
+        value
+    })
+}
+
+impl From<DataOt> for u16 {
+    fn from(item: DataOt) -> Self {
+        const SHIFT_SKIP_SLAVE_STATUS: usize = 8;
+        match item {
+            DataOt::MasterStatus(status) => status.iter().enumerate().fold(0_u16, |acc, (i, bit_state)| {
+                let value = acc | ((bit_state as u16) << (i + SHIFT_SKIP_SLAVE_STATUS));
+                value
+            }),
+            DataOt::ControlSetpoint(temperature)
+            | DataOt::BoilerTemperature(temperature)
+            | DataOt::DWHTemperature(temperature) => temperature.into(),
+            _ => todo!(),
+        }
+    }
+}
+
+pub struct DataOtIterator<'a> {
+    data: &'a DataOt,
+    data_value: u16,
+    index: Option<usize>,
+    //  iter_option: Option<dyn Iterator<Item=bool>>,
+    //  pub fn new_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Self, Error> {
+}
+
+const DATA_OT_SIZE: usize = 16usize;
+
+impl<'a> Iterator for DataOtIterator<'a> {
+    type Item = bool;
+    fn next(&mut self) -> Option<Self::Item> {
+        let next_bit = match self.index {
+            Some(index) => {
+                if index < DATA_OT_SIZE - 1 {
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        next_bit
+    }
 }
 
 impl TryFrom<u8> for OpenThermMessageCode {
@@ -228,7 +403,9 @@ impl TryFrom<u8> for OpenThermMessageCode {
         match item {
             0x00 => Ok(OpenThermMessageCode::Status),
             0x01 => Ok(OpenThermMessageCode::ControlSetpoint),
+            0x17 => Ok(OpenThermMessageCode::RelativeModulationLevel),
             0x25 => Ok(OpenThermMessageCode::BoilerTemperature),
+            0x26 => Ok(OpenThermMessageCode::DWHTemperature),
             _ => Err(()),
         }
     }
@@ -244,10 +421,10 @@ pub struct OpenThermMessage {
     msg_type: MessageType,
     //  spare 4b
     //  data_id: u8,
-    data_value: u16,
+    data_id: DataOt,
+    //  data_value: u16, //  TODO: remove that one
     //  stop bit
     cmd: OpenThermMessageCode,
-    data_id: DataOt,
 }
 
 //  TODO: Implement iterator: https://dev.to/wrongbyte/implementing-iterator-and-intoiterator-in-rust-3nio
@@ -267,7 +444,8 @@ pub struct OpenThermMessageIterator<'a> {
     message: &'a OpenThermMessage,
     state: OpenThermIteratorState,
     parity_count: u32, //  parity count + Stop Bit which means that it should yield odd number of
-                       //  ones in the 33 LSb of the frame
+    //  ones in the 33 LSb of the frame
+    data_value: u16,
 }
 
 impl<'a> Iterator for OpenThermMessageIterator<'a> {
@@ -280,10 +458,10 @@ impl<'a> Iterator for OpenThermMessageIterator<'a> {
                 let count_ones = (self.message.cmd as u8).count_ones();
                 let count_ones = count_ones + (self.message.msg_type as u8).count_ones();
                 let count_ones = count_ones + (self.message.cmd as u8).count_ones();
-                let count_ones = count_ones + (self.message.data_value as u16).count_ones();
+                let count_ones = count_ones + (self.data_value as u16).count_ones();
                 let parity_value = if count_ones % 2 == 1 { true } else { false };
                 (OpenThermIteratorState::MessageType3b(0), Some(parity_value))
-            },
+            }
             OpenThermIteratorState::MessageType3b(shift) => {
                 let value = 0_u8 != (self.message.msg_type as u8) & (0x1_u8 << shift);
                 if shift >= MESSAGE_TYPE_BIT_LEN as u8 - 1 {
@@ -308,7 +486,9 @@ impl<'a> Iterator for OpenThermMessageIterator<'a> {
                 }
             }
             OpenThermIteratorState::DataValue16b(shift) => {
-                let value = 0_u16 != (self.message.data_value as u16) & (0x1_u16 << shift);
+                //  let iterator = self.message.data_id.iter();
+                //  todo!();
+                let value = 0_u16 != self.data_value & (0x1_u16 << shift);
                 if shift >= MESSAGE_DATA_VALUE_BIT_LEN as u8 - 1 {
                     (OpenThermIteratorState::StopBit, Some(false))
                 } else {
@@ -336,6 +516,7 @@ impl OpenThermMessage {
             message: self,
             state: OpenThermIteratorState::StartBit,
             parity_count: 0u32,
+            data_value: self.data_id.into(),
         }
     }
     fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {
@@ -458,7 +639,6 @@ impl OpenThermMessage {
         Ok(Self {
             msg_type: msg_type,
             data_id: data_id,
-            data_value: 0x00, //  redundant, data already in 'data_id'
             cmd: OpenThermMessageCode::Status,
         })
     }
@@ -467,7 +647,6 @@ impl OpenThermMessage {
         Ok(Self {
             msg_type: cmd_type,
             data_id: data_ot,
-            data_value: 0x00, //  redundant, data already in 'data_id'
             cmd: OpenThermMessageCode::Status,
         })
     }

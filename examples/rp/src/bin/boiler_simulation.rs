@@ -52,7 +52,7 @@ impl BoilerSimulation {
             }
         };
 
-        let corrent_type_response = match msg.get_type() {
+        let correct_type_response = match msg.get_type() {
             MessageType::ReadData => MessageType::ReadAck,
             MessageType::WriteData => MessageType::WriteAck,
             _ => MessageType::InvalidData,
@@ -62,16 +62,40 @@ impl BoilerSimulation {
         let data = match cmd {
             DataOt::MasterStatus(status) => {
                 let slave_status = SlaveStatus::new(self.on_off_state, self.dwh_active, self.flame);
+                if status.ch_enable == CHState::Enable(true) {
+                    log::info!("Boiler Simulation: Got CH Enable signal set true ------------->  CH enable");
+                }
                 self.on_off_state = status.ch_enable;
                 self.dwh_active = status.dwh_enable;
+                if msg.get_type() != MessageType::ReadData {
+                    log::error!("Boiler Simulation: Invalid msg type for MasterStatus");
+                    return Err(OtError::IncompatibleTypeData);
+                }
                 DataOt::SlaveStatus(slave_status)
-            },
+            }
+            DataOt::ControlSetpoint(setpoint) => {
+                let response = DataOt::ControlSetpoint(self.setpoint);
+                self.setpoint = setpoint;
+                if msg.get_type() != MessageType::WriteData {
+                    log::error!("Boiler Simulation: Invalid msg type for Setpoint");
+                    return Err(OtError::IncompatibleTypeData);
+                }
+                response
+            }
+            DataOt::BoilerTemperature(temperature) => {
+                let response = DataOt::BoilerTemperature(self.boiler_temperature);
+                if msg.get_type() != MessageType::ReadData {
+                    log::error!("Boiler Simulation: Invalid msg type for BoilerTemperature");
+                    return Err(OtError::IncompatibleTypeData);
+                }
+                response
+            }
             _ => {
                 log::error!("Boiler simulation: command not implemented");
                 return Err(OtError::CommandNotSupported);
             }
         };
-        OpenThermMessage::new_from_data_ot(corrent_type_response, data)
+        OpenThermMessage::new_from_data_ot(correct_type_response, data)
     }
 }
 

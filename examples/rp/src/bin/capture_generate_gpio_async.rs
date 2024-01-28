@@ -123,7 +123,8 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
                             return Err(OtError::InvalidStart);
                         }
 
-                        let opentherm_frame_iterator = decoded_ot_msg.iter().skip(1).take(CAPTURE_OT_FRAME_PAYLOAD_SIZE);
+                        let opentherm_frame_iterator =
+                            decoded_ot_msg.iter().skip(1).take(CAPTURE_OT_FRAME_PAYLOAD_SIZE);
                         let ret_msg = OpenThermMessage::new_from_iter(opentherm_frame_iterator);
 
                         let iter = decoded_ot_msg
@@ -168,6 +169,12 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
         //      //  log::info!("msg[{count}] = {}", item as bool);
         //  }
 
+        match msg.get_data() {
+            DataOt::MasterStatus(status) => {
+                log::info!("TX Master status: ");
+            }
+            _ => (),
+        }
         let folded = msg.iter().enumerate().fold(0_u64, |acc, (i, bit_state)| {
             let value = acc | ((bit_state as u64) << i);
             value
@@ -195,7 +202,9 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
     async fn read(&mut self, cmd: DataOt) -> Result<DataOt, OtError> {
         match self.transact(MessageType::ReadData, cmd).await {
             Ok(ot) => Ok(ot.get_data()),
-            Err(er) => { return Err(er); }
+            Err(er) => {
+                return Err(er);
+            }
         }
     }
 }
@@ -233,7 +242,7 @@ impl<'d, OutPin: Pin> EdgeTriggerInterface for RpEdgeTrigger<'d, OutPin> {
                 self.output_pin.set_low();
             }
             let set_at = Instant::now();
-            log::info!("Out[{count}]: {} set at: {}_t", item as bool, set_at.as_ticks());
+            //  log::info!("Out[{count}]: {} set at: {}_t", item as bool, set_at.as_ticks());
             count += 1u32;
             next_change_ts = next_change_ts + period;
             let now = Instant::now();
@@ -354,7 +363,7 @@ where
 
 #[embassy_executor::task]
 async fn logger_task(driver: Driver<'static, USB>) {
-    embassy_usb_logger::run!(2048, log::LevelFilter::Info, driver);
+    embassy_usb_logger::run!({ 2 * 2048 }, log::LevelFilter::Info, driver);
 }
 
 #[embassy_executor::task]
@@ -371,8 +380,8 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
 
 #[embassy_executor::task]
 async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_output: Output<'static, PIN_13>) -> ! {
-    let _init_instant = Instant::now();
-    log::info!("Start capture device:");
+    let init_instant = Instant::now();
+    log::info!("Start capture device at {}", init_instant);
     let mut capture_device = RpEdgeCapture::new(async_input);
     let mut trigger_device = RpEdgeTrigger::new(async_output);
 
@@ -380,6 +389,8 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_outpu
     let mut boiler_simulation = BoilerSimulation::new();
 
     loop {
+        let listen_instant = Instant::now();
+        log::info!("BS: start listen at {}", listen_instant);
         let response = match open_therm_bus.listen().await {
             Ok(read_value) => {
                 log::info!("Boiler Simulation task got some data");
@@ -393,7 +404,7 @@ async fn boiler_simulation_task(async_input: Input<'static, PIN_12>, async_outpu
         };
 
         //  Send response:
-        Timer::after_secs(2).await;
+        Timer::after_millis(500).await;
 
         match response {
             Some(cmd) => {
@@ -420,7 +431,7 @@ async fn boiler_controller_task(async_input: Input<'static, PIN_14>, mut async_o
     loop {
         log::info!("Process Boiler controller call");
         boiler_controller.process().await;
-        Timer::after_secs(10).await;
+        Timer::after_secs(5).await;
 
         //  open_therm_bus
         //      .write(OpenThermMessageCode::Status, 0x00_u32)

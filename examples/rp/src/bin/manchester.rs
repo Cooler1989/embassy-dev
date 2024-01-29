@@ -277,6 +277,8 @@ pub fn manchester_decode<const N: usize /*Vec max size*/>(
         }
         count += 1;
     }
+    //  log::info!("Requested DEBUG manchester decoding");
+    //  DataDecodingDebug::print_debug_info(err_output);
     Ok(output)
 }
 
@@ -313,35 +315,6 @@ impl<I: Iterator<Item = bool>> Iterator for ManchesterIteratorAdapter<I> {
         ret
     }
 }
-
-//  pub fn manchester_encode<
-//      const N: usize, /*Vec max size*/
-//      const T: usize, /*period duration in us which specifies smalles amount of time the linee can state in one state*/
-//  >(
-//      _level: InitLevel,
-//      mut input: Vec<bool, N>,
-//  ) -> Result<Vec<bool, N>, CodingError> {
-//      let mut output = Vec::<bool, N>::new();
-//      while let Some(element) = input.pop() {
-//          match output.push(element) {
-//              Err(_returned_element) => {
-//                  //  returns back elemeent that was not possible
-//                  return Err(CodingError::NoSpaceAvailable);
-//              }
-//              _ => { // correct
-//              }
-//          }
-//          match output.push(!element) {
-//              Err(_returned_element) => {
-//                  //  returns back elemeent that was not possible
-//                  return Err(CodingError::NoSpaceAvailable);
-//              }
-//              _ => { // correct
-//              }
-//          }
-//      }
-//      Ok(output)
-//  }
 
 //  #[cfg(test)]
 //  mod tests {

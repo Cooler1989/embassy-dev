@@ -96,7 +96,7 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
         {
             Ok((init_state, vector)) => {
                 //  caputure
-                log::info!("BS: got data of length: {}", vector.len());
+                log::info!("OpenThermBus::listen: got data of length: {}", vector.len());
                 let mut count = 0u32;
                 let mut level = InitLevel::Low;
                 for item in vector.iter() {
@@ -118,6 +118,17 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
                             );
                             return Err(OtError::InvalidLength);
                         }
+                        //  log::info!("OpenThermBus::listen::manchester_decode() -> 0x{:x}", decoded);
+                        let foldedu64 =
+                            decoded_ot_msg
+                                .iter()
+                                .clone()
+                                .enumerate()
+                                .fold(0_u64, |acc, (i, &bit_state)| {
+                                    let value = acc | ((bit_state as u32 as u64) << i);
+                                    value
+                                });
+                        log::info!("RX: 0x{:x} | S{}", foldedu64 >> 1, foldedu64 & 0x01u64);
                         //  Check Stop Bit
                         if decoded_ot_msg[0] != true {
                             log::error!("Decoding error: Stop condition is 'false'. Must be 'true'");
@@ -128,7 +139,7 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
                             decoded_ot_msg.iter().skip(1).take(CAPTURE_OT_FRAME_PAYLOAD_SIZE);
                         let ret_msg = OpenThermMessage::try_new_from_iter(opentherm_frame_iterator);
                         if let Ok(msg) = ret_msg.clone() {
-                            log::info!("OpenThermBus::listen() -> {:?}", msg);
+                            log::info!("OpenThermBus::listen(0x{:x}) -> {:?}", msg.folded(), msg);
                         }
 
                         let mut iter = decoded_ot_msg.iter().skip(
@@ -169,20 +180,8 @@ impl<E: EdgeCaptureInterface, T: EdgeTriggerInterface> OpenThermInterface for Op
     }
 
     async fn send(&mut self, msg: OpenThermMessage) -> Result<(), OtError> {
-        //  let msg = OpenThermMessage::new_from_data_ot(message_type, cmd);
-
-        //  let mut count = 0u32;
-        //  for item in msg.iter() {
-        //      count += 1u32;
-        //      //  log::info!("msg[{count}] = {}", item as bool);
-        //  }
-
         log::info!("OpenThermBus::send: {:?}", msg);
-        let folded = msg.iter().enumerate().fold(0_u64, |acc, (i, bit_state)| {
-            let value = acc | ((bit_state as u64) << i);
-            value
-        });
-        log::info!("Send: 0x{:x} | {} ", folded >> 1, folded & 0x1); //  Print but lose stop bit
+        log::info!("Send: 0x{:x}", msg.folded());
 
         let manchester_adapter = ManchesterIteratorAdapter::new(msg.iter());
         match self.edge_trigger_drv.trigger(manchester_adapter).await {

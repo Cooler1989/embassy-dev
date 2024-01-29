@@ -170,9 +170,10 @@ pub struct MasterStatus {
 const MASTER_STATUS_IGNORE_COUNT: u8 = 6;
 
 enum MasterStatusEnumeration {
+    Initial,
+    Ignore(u8),
     ChEnable,
     DwhEnable,
-    Ignore(u8),
     Depleted,
 }
 
@@ -186,24 +187,26 @@ impl<'a> Iterator for MasterStatusIterator<'a> {
     type Item = bool;
     fn next(&mut self) -> Option<Self::Item> {
         let (next, ret_value) = match self.enumeration {
-            MasterStatusEnumeration::ChEnable => {
-                let value = match self.status.ch_enable {
-                    CHState::Enable(val) => val,
+            MasterStatusEnumeration::Initial => (MasterStatusEnumeration::Ignore(1), Some(false)),
+            MasterStatusEnumeration::Ignore(count) => {
+                let next = if count < MASTER_STATUS_IGNORE_COUNT - 1 {
+                    MasterStatusEnumeration::Ignore(count + 1)
+                } else {
+                    MasterStatusEnumeration::DwhEnable
                 };
-                (MasterStatusEnumeration::DwhEnable, Some(value))
+                (next, Some(false))
             }
             MasterStatusEnumeration::DwhEnable => {
                 let value = match self.status.dwh_enable {
                     DWHState::Enable(val) => val,
                 };
-                (MasterStatusEnumeration::Ignore(0), Some(value))
+                (MasterStatusEnumeration::ChEnable, Some(value))
             }
-            MasterStatusEnumeration::Ignore(count) => {
-                if count < MASTER_STATUS_IGNORE_COUNT {
-                    (MasterStatusEnumeration::Ignore(count + 1), Some(false))
-                } else {
-                    (MasterStatusEnumeration::Depleted, None)
-                }
+            MasterStatusEnumeration::ChEnable => {
+                let value = match self.status.ch_enable {
+                    CHState::Enable(val) => val,
+                };
+                (MasterStatusEnumeration::Depleted, Some(value))
             }
             MasterStatusEnumeration::Depleted => (MasterStatusEnumeration::Depleted, None),
         };
@@ -230,7 +233,7 @@ impl MasterStatus {
     }
     pub fn iter(&self) -> MasterStatusIterator {
         MasterStatusIterator {
-            enumeration: MasterStatusEnumeration::ChEnable,
+            enumeration: MasterStatusEnumeration::Initial,
             status: self,
         }
     }
@@ -273,12 +276,14 @@ impl SlaveStatus {
         }
     }
 }
+
 enum SlaveStatusEnumeration {
+    Initial,
+    Ignore(u8),
     Fault,
     ChEnable,
     DwhEnable,
     Flame,
-    Ignore(u8),
     Depleted,
 }
 
@@ -294,37 +299,27 @@ impl<'a> Iterator for SlaveStatusIterator<'a> {
     type Item = bool;
     fn next(&mut self) -> Option<Self::Item> {
         let (next, ret_value) = match self.enumeration {
-            SlaveStatusEnumeration::Fault => {
-                let value = match self.status.fault {
-                    Fault::Value(val) => val,
-                };
-                (SlaveStatusEnumeration::ChEnable, Some(value))
-            }
-            SlaveStatusEnumeration::ChEnable => {
-                let value = match self.status.ch_active {
-                    CHState::Enable(val) => val,
-                };
-                (SlaveStatusEnumeration::DwhEnable, Some(value))
-            }
-            SlaveStatusEnumeration::DwhEnable => {
-                let value = match self.status.dwh_active {
-                    DWHState::Enable(val) => val,
-                };
-                (SlaveStatusEnumeration::Flame, Some(value))
-            }
-            SlaveStatusEnumeration::Flame => {
-                let value = match self.status.flame_active {
-                    FlameState::Active(val) => val,
-                };
-                (SlaveStatusEnumeration::Ignore(0), Some(value))
-            }
+            SlaveStatusEnumeration::Initial => (SlaveStatusEnumeration::Ignore(1), Some(false)),
             SlaveStatusEnumeration::Ignore(count) => {
-                if count < SLAVE_STATUS_IGNORE_COUNT {
-                    (SlaveStatusEnumeration::Ignore(count + 1), Some(false))
+                let next_state = if count < SLAVE_STATUS_IGNORE_COUNT - 1 {
+                    SlaveStatusEnumeration::Ignore(count + 1)
                 } else {
-                    (SlaveStatusEnumeration::Depleted, None)
-                }
+                    SlaveStatusEnumeration::Flame
+                };
+                (next_state, Some(false))
             }
+            SlaveStatusEnumeration::Flame => match self.status.flame_active {
+                FlameState::Active(val) => (SlaveStatusEnumeration::DwhEnable, Some(val)),
+            },
+            SlaveStatusEnumeration::DwhEnable => match self.status.dwh_active {
+                DWHState::Enable(val) => (SlaveStatusEnumeration::ChEnable, Some(val)),
+            },
+            SlaveStatusEnumeration::ChEnable => match self.status.ch_active {
+                CHState::Enable(val) => (SlaveStatusEnumeration::Fault, Some(val)),
+            },
+            SlaveStatusEnumeration::Fault => match self.status.fault {
+                Fault::Value(val) => (SlaveStatusEnumeration::Depleted, Some(val)),
+            },
             SlaveStatusEnumeration::Depleted => (SlaveStatusEnumeration::Depleted, None),
         };
         self.enumeration = next;
@@ -423,11 +418,11 @@ impl From<DataOt> for u16 {
         const SHIFT_SKIP_SLAVE_STATUS: usize = 8;
         match item {
             DataOt::MasterStatus(status) => status.iter().enumerate().fold(0_u16, |acc, (i, bit_state)| {
-                let value = acc | ((bit_state as u16) << (i + SHIFT_SKIP_SLAVE_STATUS));
+                let value = acc | ((bit_state as u16) << (7 - i + SHIFT_SKIP_SLAVE_STATUS));
                 value
             }),
             DataOt::SlaveStatus(status) => status.iter().enumerate().fold(0_u8, |acc, (i, bit_state)| {
-                let value = acc | ((bit_state as u8) << i);
+                let value = acc | ((bit_state as u8) << (7 - i));
                 value
             }) as u16,
             DataOt::ControlSetpoint(temperature)
@@ -558,7 +553,7 @@ impl<'a> Iterator for OpenThermMessageIterator<'a> {
             OpenThermIteratorState::DataValue16b(shift) => {
                 //  let iterator = self.message.data_id.iter();
                 //  todo!();
-                let value = 0_u16 != self.data_value & (0x1_u16 << shift);
+                let value = 0_u16 != self.data_value & (0x1_u16 << (15 - shift));
                 if shift >= MESSAGE_DATA_VALUE_BIT_LEN as u8 - 1 {
                     (OpenThermIteratorState::StopBit, Some(false))
                 } else {
@@ -610,6 +605,17 @@ impl OpenThermMessage {
         return self.msg_type.clone();
     }
 
+    pub fn folded(&self) -> u32 {
+        self.iter()
+            .skip(1)
+            .take(CAPTURE_OT_FRAME_PAYLOAD_SIZE)
+            .enumerate()
+            .fold(0_u32, |acc, (i, bit_state)| {
+                let value = acc | ((bit_state as u32) << (31 - i));
+                value
+            })
+    }
+
     fn decode_data_ot<'a>(
         data_id: OpenThermMessageCode,
         msg_type: MessageType,
@@ -618,13 +624,15 @@ impl OpenThermMessage {
         let data_float8_8 = Self::float8_8_from_iter(data_value_iterator.clone()).unwrap();
         match data_id {
             OpenThermMessageCode::Status => match msg_type {
+                MessageType::ReadData => {
+                    //  iterate flag8 into bool flags
+                    Ok(DataOt::MasterStatus(MasterStatus::new_from_iter(
+                        data_value_iterator.skip(8),
+                    )?))
+                }
                 MessageType::ReadAck => {
                     //  iterate flag8 into bool flags
                     Ok(DataOt::SlaveStatus(SlaveStatus::new_from_iter(data_value_iterator)?))
-                }
-                MessageType::ReadData => {
-                    //  iterate flag8 into bool flags
-                    Ok(DataOt::MasterStatus(MasterStatus::new_from_iter(data_value_iterator)?))
                 }
                 _ => {
                     return Err(Error::DecodingError);
@@ -648,7 +656,7 @@ impl OpenThermMessage {
                 .take(CAPTURE_OT_FRAME_PAYLOAD_SIZE)
                 .enumerate()
                 .fold(0_u32, |acc, (i, &bit_state)| {
-                    let value = acc | ((bit_state as u32) << i);
+                    let value = acc | ((bit_state as u32) << (31 - i));
                     value
                 });
         log::info!("Folded OR: 0x{:x}", folded);
@@ -679,7 +687,7 @@ impl OpenThermMessage {
             });
         log::info!("DataId = 0x{:x}", data_id);
 
-        let data_id: OpenThermMessageCode = match data_id.try_into() {
+        let message_code: OpenThermMessageCode = match data_id.try_into() {
             Ok(msg) => msg,
             Err(_) => {
                 log::error!("Unable to decode Data-Id: 0b{:b}", data_id);
@@ -711,20 +719,31 @@ impl OpenThermMessage {
         let parity = iter.next();
 
         //  Deconding based on other types
-        let data_id = Self::decode_data_ot(data_id, msg_type, data_value_iterator)?;
+        let data_id_decoded = Self::decode_data_ot(message_code, msg_type, data_value_iterator)?;
 
+        log::info!("msg_type: {:?}", msg_type);
+        log::info!("message_code: {:?}", message_code);
+        log::info!("data_id_decoded: {:?}", data_id_decoded);
         Ok(Self {
             msg_type: msg_type,
-            data_id: data_id,
-            cmd: OpenThermMessageCode::Status,
+            data_id: data_id_decoded,
+            cmd: message_code,
         })
     }
 
     pub fn new_from_data_ot(cmd_type: MessageType, data_ot: DataOt) -> Result<Self, Error> {
+        let cmd_decoded = match data_ot {
+            DataOt::MasterStatus(_) => OpenThermMessageCode::Status,
+            DataOt::SlaveStatus(_) => OpenThermMessageCode::Status,
+            DataOt::ControlSetpoint(_) => OpenThermMessageCode::ControlSetpoint,
+            DataOt::RelativeModulationLevel(_) => OpenThermMessageCode::RelativeModulationLevel,
+            DataOt::BoilerTemperature(_) => OpenThermMessageCode::BoilerTemperature,
+            DataOt::DWHTemperature(_) => OpenThermMessageCode::DWHTemperature,
+        };
         Ok(Self {
             msg_type: cmd_type,
             data_id: data_ot,
-            cmd: OpenThermMessageCode::Status,
+            cmd: cmd_decoded,
         })
     }
 }

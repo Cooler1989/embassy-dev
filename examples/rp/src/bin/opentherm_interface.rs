@@ -396,6 +396,21 @@ impl DataOt {
 //      }
 //  }
 
+impl From<DataOt> for OpenThermMessageCode {
+    //  type Error = ();
+    fn from(item: DataOt) -> Self {
+        match item {
+            DataOt::MasterStatus(_) => OpenThermMessageCode::Status,
+            DataOt::SlaveStatus(_) => OpenThermMessageCode::Status,
+            DataOt::ControlSetpoint(_) => OpenThermMessageCode::ControlSetpoint,
+            DataOt::RelativeModulationLevel(_) => OpenThermMessageCode::RelativeModulationLevel,
+            DataOt::BoilerTemperature(_) => OpenThermMessageCode::BoilerTemperature,
+            DataOt::DWHTemperature(_) => OpenThermMessageCode::DWHTemperature,
+            // _ => Err(()),
+        }
+    }
+}
+
 //  use core::num::Unsigned;
 use fixed::types::extra::Unsigned;
 
@@ -482,6 +497,7 @@ impl TryFrom<u8> for OpenThermMessageCode {
 pub struct OpenThermMessage {
     // start bit
     // parity bit
+    parity: bool,
     msg_type: MessageType,
     //  spare 4b
     //  data_id: u8,
@@ -519,13 +535,7 @@ impl<'a> Iterator for OpenThermMessageIterator<'a> {
         let (new_state, return_value) = match self.state {
             OpenThermIteratorState::StartBit => (OpenThermIteratorState::Parity, Some(true)),
             OpenThermIteratorState::Parity => {
-                //  count ones:
-                let count_ones = (self.message.cmd as u8).count_ones();
-                let count_ones = count_ones + (self.message.msg_type as u8).count_ones();
-                let count_ones = count_ones + (self.message.cmd as u8).count_ones();
-                let count_ones = count_ones + (self.data_value as u16).count_ones();
-                let parity_value = if count_ones % 2 == 1 { true } else { false };
-                (OpenThermIteratorState::MessageType3b(0), Some(parity_value))
+                (OpenThermIteratorState::MessageType3b(0), Some(self.message.parity))
             }
             OpenThermIteratorState::MessageType3b(shift) => {
                 let value = 0_u8 != (self.message.msg_type as u8) & (0x1_u8 << shift);
@@ -716,7 +726,7 @@ impl OpenThermMessage {
         };
 
         let mut iter = iter.skip(MESSAGE_TYPE_BIT_LEN);
-        let parity = iter.next();
+        let parity = iter.next().unwrap().clone();
 
         //  Deconding based on other types
         let data_id_decoded = Self::decode_data_ot(message_code, msg_type, data_value_iterator)?;
@@ -725,6 +735,7 @@ impl OpenThermMessage {
         log::info!("message_code: {:?}", message_code);
         log::info!("data_id_decoded: {:?}", data_id_decoded);
         Ok(Self {
+            parity: parity,
             msg_type: msg_type,
             data_id: data_id_decoded,
             cmd: message_code,
@@ -732,15 +743,12 @@ impl OpenThermMessage {
     }
 
     pub fn new_from_data_ot(cmd_type: MessageType, data_ot: DataOt) -> Result<Self, Error> {
-        let cmd_decoded = match data_ot {
-            DataOt::MasterStatus(_) => OpenThermMessageCode::Status,
-            DataOt::SlaveStatus(_) => OpenThermMessageCode::Status,
-            DataOt::ControlSetpoint(_) => OpenThermMessageCode::ControlSetpoint,
-            DataOt::RelativeModulationLevel(_) => OpenThermMessageCode::RelativeModulationLevel,
-            DataOt::BoilerTemperature(_) => OpenThermMessageCode::BoilerTemperature,
-            DataOt::DWHTemperature(_) => OpenThermMessageCode::DWHTemperature,
-        };
+        let cmd_decoded: OpenThermMessageCode = data_ot.into();
+        let number_of_ones = (cmd_type as u8).count_ones()
+            + (cmd_decoded as u8).count_ones()
+            + (<DataOt as Into<u16>>::into(data_ot)).count_ones();
         Ok(Self {
+            parity: if number_of_ones % 2 == 1 {true} else {false},
             msg_type: cmd_type,
             data_id: data_ot,
             cmd: cmd_decoded,

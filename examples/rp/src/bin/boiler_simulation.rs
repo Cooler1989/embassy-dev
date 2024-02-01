@@ -6,12 +6,12 @@ use crate::opentherm_interface::{
 use crate::opentherm_interface::{DWHState, FlameState, SlaveStatus};
 use embassy_time::{Duration, Instant, Timer};
 
-const TEMP_RATE_PER_60SEC: Temperature = Temperature::Celsius(5);
-//  impl Default for Instant {
-//      fn default() -> Self {
-//          Instant::now()
-//      }
-//  }
+const TEMP_CHANGE_VALUE: Temperature = Temperature::Celsius(1);
+const TEMP_CHANGE_RATE: Duration = Duration::from_secs(10);
+const BOILER_MAX_TEMP: Temperature = Temperature::Celsius(60);
+const TEMP_UPPER_TURN_OFF_HIST: Temperature = Temperature::Celsius(8);
+const TEMP_LOWER_TURN_ON_HIST: Temperature = Temperature::Celsius(6);
+
 //  #[derive(Default)]
 pub struct BoilerSimulation {
     //  struct for testing operation of the driver used for boiler control
@@ -34,23 +34,43 @@ impl BoilerSimulation {
             last_process_call: Instant::now(),
         }
     }
+
+    fn maintain_state(&mut self) {
+        let period_last_call = Instant::now().duration_since(self.last_process_call);
+        //  only update state after at least a second interval
+        if period_last_call > TEMP_CHANGE_RATE {
+            self.last_process_call = Instant::now();
+            // elevate integer calculation 1000 times
+            if self.flame == FlameState::Active(true) {
+                self.boiler_temperature = self.boiler_temperature + TEMP_CHANGE_VALUE;
+            } else {
+                self.boiler_temperature = self.boiler_temperature - TEMP_CHANGE_VALUE;
+            }
+        }
+
+        // update the boiler state
+        self.flame = match self.boiler_temperature {
+            Temperature::Celsius(t)
+                if self.flame == FlameState::Active(true)
+                    && Temperature::Celsius(t) >= self.setpoint + TEMP_UPPER_TURN_OFF_HIST =>
+            {
+                FlameState::Active(false)
+            }
+            Temperature::Celsius(t)
+                if self.flame == FlameState::Active(false)
+                    && Temperature::Celsius(t) <= self.setpoint - TEMP_LOWER_TURN_ON_HIST =>
+            {
+                FlameState::Active(true)
+            }
+            Temperature::Celsius(_) => self.flame,
+        };
+    }
+
     //  accepts OpenTherm message
     //  returns the one that would be sent in response by the Boiler
     pub fn process(&mut self, msg: OpenThermMessage) -> Result<OpenThermMessage, OtError> {
         let cmd = msg.get_data();
-        let period_last_call = Instant::now().duration_since(self.last_process_call);
-        self.last_process_call = Instant::now();
-        // update the boiler stat
-
-        // elevate integer calculation 1000 times
-        let time_ratio_ticks = 1000_u64 * period_last_call.as_ticks() / Duration::from_secs(60).as_ticks();
-        let new_temperature = match self.boiler_temperature {
-            Temperature::Celsius(int) => {
-                let coef = match TEMP_RATE_PER_60SEC {
-                    Temperature::Celsius(v) => 1000 * v,
-                };
-            }
-        };
+        self.maintain_state();
 
         let correct_type_response = match msg.get_type() {
             MessageType::ReadData => MessageType::ReadAck,
@@ -60,17 +80,22 @@ impl BoilerSimulation {
 
         //  Command handling:
         let data = match cmd {
-            DataOt::MasterStatus(status) => {
+            DataOt::MasterStatus(rx_status) => {
                 let slave_status = SlaveStatus::new(self.on_off_state, self.dwh_active, self.flame);
-                if status.ch_enable == CHState::Enable(true) {
+                if rx_status.ch_enable == CHState::Enable(true) {
                     log::info!("Boiler Simulation: Got CH Enable signal set true ------------->  CH enable");
                 }
-                self.on_off_state = status.ch_enable;
-                self.dwh_active = status.dwh_enable;
+                self.on_off_state = rx_status.ch_enable;
+                self.dwh_active = rx_status.dwh_enable;
                 if msg.get_type() != MessageType::ReadData {
                     log::error!("Boiler Simulation: Invalid msg type for MasterStatus");
                     return Err(OtError::IncompatibleTypeData);
                 }
+                let iter_fold = slave_status.iter().enumerate().fold(0_u32, |acc, (i, bit_state)| {
+                    let value = acc | ((bit_state as u32) << i);
+                    value
+                });
+                log::info!("boiler simulation Slave status fold response: 0x{:x}", iter_fold);
                 DataOt::SlaveStatus(slave_status)
             }
             DataOt::ControlSetpoint(setpoint) => {
@@ -86,6 +111,7 @@ impl BoilerSimulation {
                 let response = DataOt::BoilerTemperature(self.boiler_temperature);
                 if msg.get_type() != MessageType::ReadData {
                     log::error!("Boiler Simulation: Invalid msg type for BoilerTemperature");
+                    todo!();
                     return Err(OtError::IncompatibleTypeData);
                 }
                 response

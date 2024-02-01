@@ -1,6 +1,6 @@
 use core::convert::From;
 use core::convert::TryFrom;
-use core::ops::Add;
+use core::ops::{Add, Sub};
 
 //  use bytes::Buf;
 
@@ -28,6 +28,7 @@ pub enum Error {
     InvalidStart,
     InvalidLength,
     DecodingError,
+    DataFormatError,
     ParityError,
     CommandNotSupported,
     UnexpectedResult,
@@ -106,7 +107,7 @@ impl Default for DWHState {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum FlameState {
     Active(bool),
 }
@@ -143,9 +144,20 @@ enum Float8_8 {
     //  fractional(u8),
 }
 
-impl From<Float8_8> for Temperature {
-    fn from(item: Float8_8) -> Self {
-        todo!();
+//  impl Float8_8 {
+//      pub fn get(&self) -> i16 {
+//          Self::Signed
+//      }
+//  }
+
+impl TryFrom<Float8_8> for Temperature {
+    type Error = ();
+    fn try_from(item: Float8_8) -> Result<Self, ()> {
+        if let Float8_8::Signed(v) = item {
+            Ok(Temperature::Celsius(v))
+        } else {
+            return Err(());
+        }
     }
 }
 
@@ -271,7 +283,7 @@ impl SlaveStatus {
     }
     pub fn iter(&self) -> SlaveStatusIterator {
         SlaveStatusIterator {
-            enumeration: SlaveStatusEnumeration::Fault,
+            enumeration: SlaveStatusEnumeration::Initial,
             status: self,
         }
     }
@@ -336,11 +348,11 @@ pub enum Percent {
 #[repr(u8)]
 #[derive(Copy, Clone, Debug)]
 pub enum OpenThermMessageCode {
-    Status = 0x00,
-    ControlSetpoint = 0x01,
-    RelativeModulationLevel = 0x17,
-    BoilerTemperature = 0x25,
-    DWHTemperature = 0x26,
+    Status = 0,
+    ControlSetpoint = 1,
+    RelativeModulationLevel = 17,
+    BoilerTemperature = 25,
+    DWHTemperature = 26,
     Unrecognized = 0xFF,
 }
 
@@ -479,12 +491,19 @@ impl TryFrom<u8> for OpenThermMessageCode {
     type Error = ();
     fn try_from(item: u8) -> Result<Self, Self::Error> {
         match item {
-            0x00 => Ok(OpenThermMessageCode::Status),
-            0x01 => Ok(OpenThermMessageCode::ControlSetpoint),
-            0x17 => Ok(OpenThermMessageCode::RelativeModulationLevel),
-            0x25 => Ok(OpenThermMessageCode::BoilerTemperature),
-            0x26 => Ok(OpenThermMessageCode::DWHTemperature),
-            _ => Err(()),
+            item if item == (OpenThermMessageCode::Status as u8) => Ok(OpenThermMessageCode::Status),
+            item if item == (OpenThermMessageCode::ControlSetpoint as u8) => Ok(OpenThermMessageCode::ControlSetpoint),
+            item if item == (OpenThermMessageCode::RelativeModulationLevel as u8) => {
+                Ok(OpenThermMessageCode::RelativeModulationLevel)
+            }
+            item if item == (OpenThermMessageCode::BoilerTemperature as u8) => {
+                Ok(OpenThermMessageCode::BoilerTemperature)
+            }
+            item if item == (OpenThermMessageCode::DWHTemperature as u8) => Ok(OpenThermMessageCode::DWHTemperature),
+            _ => {
+                todo!();
+                Err(())
+            }
         }
     }
 }
@@ -513,10 +532,10 @@ pub struct OpenThermMessage {
 enum OpenThermIteratorState {
     StartBit,
     Parity,
-    MessageType3b(u8),
-    Spare4b(u8),
-    DataId8b(u8),
-    DataValue16b(u8),
+    MessageType3b(usize),
+    Spare4b(usize),
+    DataId8b(usize),
+    DataValue16b(usize),
     StopBit,
     Depleted,
 }
@@ -534,37 +553,33 @@ impl<'a> Iterator for OpenThermMessageIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let (new_state, return_value) = match self.state {
             OpenThermIteratorState::StartBit => (OpenThermIteratorState::Parity, Some(true)),
-            OpenThermIteratorState::Parity => {
-                (OpenThermIteratorState::MessageType3b(0), Some(self.message.parity))
-            }
+            OpenThermIteratorState::Parity => (OpenThermIteratorState::MessageType3b(0), Some(self.message.parity)),
             OpenThermIteratorState::MessageType3b(shift) => {
-                let value = 0_u8 != (self.message.msg_type as u8) & (0x1_u8 << shift);
-                if shift >= MESSAGE_TYPE_BIT_LEN as u8 - 1 {
+                let value = 0_u8 != (self.message.msg_type as u8) & (0x1_u8 << (MESSAGE_TYPE_BIT_LEN - 1 - shift));
+                if shift >= MESSAGE_TYPE_BIT_LEN - 1 {
                     (OpenThermIteratorState::Spare4b(0), Some(value))
                 } else {
                     (OpenThermIteratorState::MessageType3b(shift + 1), Some(value))
                 }
             }
             OpenThermIteratorState::Spare4b(shift) => {
-                if shift >= OT_FRAME_SKIP_SPARE as u8 - 1 {
+                if shift >= OT_FRAME_SKIP_SPARE - 1 {
                     (OpenThermIteratorState::DataId8b(0), Some(false))
                 } else {
                     (OpenThermIteratorState::Spare4b(shift + 1), Some(false))
                 }
             }
             OpenThermIteratorState::DataId8b(shift) => {
-                let value = 0_u8 != (self.message.cmd as u8) & (0x1_u8 << shift);
-                if shift >= MESSAGE_DATA_ID_BIT_LEN as u8 - 1 {
+                let value = 0_u8 != (self.message.cmd as u8) & (0x1_u8 << (MESSAGE_DATA_ID_BIT_LEN - 1 - shift));
+                if shift >= MESSAGE_DATA_ID_BIT_LEN - 1 {
                     (OpenThermIteratorState::DataValue16b(0), Some(value))
                 } else {
                     (OpenThermIteratorState::DataId8b(shift + 1), Some(value))
                 }
             }
             OpenThermIteratorState::DataValue16b(shift) => {
-                //  let iterator = self.message.data_id.iter();
-                //  todo!();
-                let value = 0_u16 != self.data_value & (0x1_u16 << (15 - shift));
-                if shift >= MESSAGE_DATA_VALUE_BIT_LEN as u8 - 1 {
+                let value = 0_u16 != self.data_value & (0x1_u16 << (MESSAGE_DATA_VALUE_BIT_LEN - 1 - shift));
+                if shift >= MESSAGE_DATA_VALUE_BIT_LEN - 1 {
                     (OpenThermIteratorState::StopBit, Some(false))
                 } else {
                     (OpenThermIteratorState::DataValue16b(shift + 1), Some(value))
@@ -649,11 +664,15 @@ impl OpenThermMessage {
                 }
             },
             //  fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {
-            OpenThermMessageCode::ControlSetpoint => Ok(DataOt::ControlSetpoint(data_float8_8.into())), // f8.8 TODO: use u3
-            // to map float
-            OpenThermMessageCode::BoilerTemperature => Ok(DataOt::BoilerTemperature(data_float8_8.into())),
+            OpenThermMessageCode::ControlSetpoint => Ok(DataOt::ControlSetpoint(
+                data_float8_8.try_into().map_err(|e| Error::DataFormatError)?,
+            )),
+            OpenThermMessageCode::BoilerTemperature => Ok(DataOt::BoilerTemperature(
+                data_float8_8.try_into().map_err(|e| Error::DataFormatError)?,
+            )),
             _ => {
                 log::error!("Unrecognized DataId");
+                todo!();
                 return Err(Error::UnknownDataId);
             }
         }
@@ -748,7 +767,7 @@ impl OpenThermMessage {
             + (cmd_decoded as u8).count_ones()
             + (<DataOt as Into<u16>>::into(data_ot)).count_ones();
         Ok(Self {
-            parity: if number_of_ones % 2 == 1 {true} else {false},
+            parity: if number_of_ones % 2 == 1 { true } else { false },
             msg_type: cmd_type,
             data_id: data_ot,
             cmd: cmd_decoded,
@@ -774,6 +793,24 @@ pub enum CommunicationState {
 #[derive(PartialEq, PartialOrd, Clone, Copy, Debug)]
 pub enum Temperature {
     Celsius(i16),
+}
+
+impl Sub for Temperature {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self::Output {
+        let ts = if let Temperature::Celsius(tsval) = self {
+            tsval
+        } else {
+            0
+        };
+        let to = if let Temperature::Celsius(toval) = other {
+            toval
+        } else {
+            0
+        };
+        Self::Celsius(ts - to)
+    }
 }
 
 impl Default for Temperature {

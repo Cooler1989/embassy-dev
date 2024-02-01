@@ -138,24 +138,31 @@ impl<D: OpenThermInterface> BoilerControl<D> {
             }
             CommunicationState::Control => {
                 let temp_to_send = self.set_point_control_internal();
-                if let Ok(value) = self.device.write(DataOt::BoilerTemperature(temp_to_send)).await {
-                    //  self.device.read(DataOt::Setpoint(Default::default())).await {
-                    log::info!("Boiler setpoint sent");
-                } else {
-                    log::error!("Boiler set setpoint failure");
+                match self.device.write(DataOt::ControlSetpoint(temp_to_send)).await {
+                    Ok(value) => {
+                        //  self.device.read(DataOt::Setpoint(Default::default())).await {
+                        log::info!("Boiler setpoint sent");
+                    }
+                    Err(e) => {
+                        log::error!("Boiler set setpoint failure");
+                    }
                 }
                 //  self.device.write(DataOt::BoilerTemperature(temp_to_send));
                 CommunicationState::Diagnostics
             }
             CommunicationState::Diagnostics => {
-                if let Ok(value) = self.device.read(DataOt::BoilerTemperature(Default::default())).await {
-                    if let DataOt::BoilerTemperature(value) = value {
-                        if let Temperature::Celsius(value) = value {
-                            log::info!("Boiler temp read: {}", value);
+                /* if let Ok(value) = */
+                match self.device.read(DataOt::BoilerTemperature(Default::default())).await {
+                    Ok(value) => {
+                        if let DataOt::BoilerTemperature(value) = value {
+                            if let Temperature::Celsius(value) = value {
+                                log::info!("Boiler temp read: {}", value);
+                            }
                         }
                     }
-                } else {
-                    log::error!("Boiler response failure");
+                    Err(e) => {
+                        log::error!("Boiler response failure: {:?}", e);
+                    }
                 }
                 CommunicationState::StatusExchange
             }

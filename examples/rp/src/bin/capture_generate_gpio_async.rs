@@ -334,7 +334,10 @@ impl<'d, InPin: Pin, const N: usize> EdgeCaptureInterface<N> for RpEdgeCapture<'
                         Instant::now().duration_since(capture_timestamp),
                     )
                     .unwrap(); //  here handle error
-                    log::info!("Break capture with timeout: {}", timeout);
+                    log::info!(
+                        "Break capture with timeout of: {} period",
+                        timeout.as_ticks() / MANCHESTER_RESOLUTION.as_ticks()
+                    );
                     break;
                 } //  TODO: check if the error was timeout
             }
@@ -442,7 +445,7 @@ async fn boiler_controller_task(async_input: Input<'static, PIN_14>, mut async_o
     loop {
         log::info!("Process Boiler controller call");
         boiler_controller.process().await;
-        Timer::after_secs(5).await;
+        Timer::after_secs(4).await;
 
         //  open_therm_bus
         //      .write(OpenThermMessageCode::Status, 0x00_u32)

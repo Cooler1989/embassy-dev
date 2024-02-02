@@ -287,6 +287,9 @@ impl SlaveStatus {
             status: self,
         }
     }
+    pub fn get_flame_active(&self) -> FlameState {
+        self.flame_active
+    }
 }
 
 enum SlaveStatusEnumeration {
@@ -610,11 +613,11 @@ impl OpenThermMessage {
         }
     }
     fn float8_8_from_iter<'a>(iterator: impl Iterator<Item = &'a bool> + Clone) -> Result<Float8_8, Error> {
-        let sign = iterator.clone().next().unwrap();
-        let data_value = iterator.skip(1).enumerate().fold(0_i16, |acc, (i, &bit_state)| {
+        let data_value = iterator.clone().take(15).enumerate().fold(0_i16, |acc, (i, &bit_state)| {
             let value = acc | ((bit_state as i16) << i);
             value
         });
+        let sign = iterator.skip(15).next().unwrap();
         //  return:
         match *sign {
             true => Ok(Float8_8::Signed(-1i16 * data_value)),
@@ -636,7 +639,7 @@ impl OpenThermMessage {
             .take(CAPTURE_OT_FRAME_PAYLOAD_SIZE)
             .enumerate()
             .fold(0_u32, |acc, (i, bit_state)| {
-                let value = acc | ((bit_state as u32) << (31 - i));
+                let value = acc | ((bit_state as u32) << (CAPTURE_OT_FRAME_PAYLOAD_SIZE - 1 - i));
                 value
             })
     }
@@ -685,7 +688,7 @@ impl OpenThermMessage {
                 .take(CAPTURE_OT_FRAME_PAYLOAD_SIZE)
                 .enumerate()
                 .fold(0_u32, |acc, (i, &bit_state)| {
-                    let value = acc | ((bit_state as u32) << (31 - i));
+                    let value = acc | ((bit_state as u32) << (CAPTURE_OT_FRAME_PAYLOAD_SIZE - 1 - i));
                     value
                 });
         log::info!("Folded OR: 0x{:x}", folded);

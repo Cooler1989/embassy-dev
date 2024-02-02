@@ -50,15 +50,13 @@ impl BoilerSimulation {
 
         // update the boiler state
         self.flame = match self.boiler_temperature {
-            Temperature::Celsius(t)
-                if self.flame == FlameState::Active(true)
-                    && Temperature::Celsius(t) >= self.setpoint + TEMP_UPPER_TURN_OFF_HIST =>
+            t if self.flame == FlameState::Active(true)
+                    && t >= self.setpoint + TEMP_UPPER_TURN_OFF_HIST =>
             {
                 FlameState::Active(false)
             }
-            Temperature::Celsius(t)
-                if self.flame == FlameState::Active(false)
-                    && Temperature::Celsius(t) <= self.setpoint - TEMP_LOWER_TURN_ON_HIST =>
+            t if self.flame == FlameState::Active(false)
+                    && t <= self.setpoint - TEMP_LOWER_TURN_ON_HIST =>
             {
                 FlameState::Active(true)
             }

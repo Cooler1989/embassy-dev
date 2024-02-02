@@ -1,6 +1,6 @@
 use crate::opentherm_interface::Error as OtError;
 use crate::opentherm_interface::{
-    CHState, CommunicationState, DWHState, DataOt, MasterStatus, OpenThermInterface, OpenThermMessageCode, Temperature,
+    CHState, FlameState, CommunicationState, DWHState, DataOt, MasterStatus, OpenThermInterface, OpenThermMessageCode, Temperature,
 };
 
 const MIN_TEMPERATURE_SETPOINT: Temperature = Temperature::Celsius(16i16);
@@ -25,6 +25,7 @@ pub struct BoilerControl<D: OpenThermInterface> {
     max_setpoint: Temperature,
     burner_start_timestamp: u32,
     maintain_ch_state: CHState,
+    flame_last_read: Option<FlameState>,
 }
 
 enum BoilerStatus {
@@ -52,6 +53,7 @@ impl<D: OpenThermInterface> BoilerControl<D> {
             setpoint: MIN_TEMPERATURE_SETPOINT,
             burner_start_timestamp: 0u32,
             maintain_ch_state: CHState::Enable(false),
+            flame_last_read: None,
         }
     }
 
@@ -122,15 +124,21 @@ impl<D: OpenThermInterface> BoilerControl<D> {
                 log::info!("Boiler Controller sends data: {:?}", master_status);
                 if let Ok(expected_slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
                     log::info!("Boiler Controller got back data: {:?}", expected_slave_status);
-                    // expected_slave_status
+                    match expected_slave_status {
+                        DataOt::SlaveStatus(status) => {
+                            let flame_read_status = status.get_flame_active();
+                            match self.flame_last_read {
+                                Some(flame_prev) if flame_prev != flame_read_status => {
+                                    todo!();   //  make state transition here
+                                },
+                                Some(_) => {},
+                                None => self.flame_last_read = Some(flame_read_status),
+                            }
+                        }
+                        _ => {
+                        }
+                    }
 
-                    //  sent was correct
-                    //  let _response = match self.device.listen().await {
-                    //      Ok(response) => {}
-                    //      _ => {
-                    //          log::error!("Boiler::process(): Response to MasterStatus is not valid");
-                    //      }
-                    //  };
                 } else {
                     log::error!("Boiler failed to report Status!");
                 }

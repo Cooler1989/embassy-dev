@@ -23,6 +23,7 @@ defmt = "0.3"
 defmt-rtt = "0.4"
 fixed = "1.23.1"
 fixed-macro = "1.2"
+rust-mqtt = { version = "0.2.0", default-features = false }
 
 #cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
 cortex-m = { version = "0.7.6", features = ["inline-asm"] }

@@ -2,12 +2,19 @@ use crate::opentherm_interface::Error as OtError;
 use crate::opentherm_interface::{
     CHState, FlameState, CommunicationState, DWHState, DataOt, MasterStatus, OpenThermInterface, OpenThermMessageCode, Temperature,
 };
+use embassy_time::{Duration, Instant, Timer};
+
+//  TODO:
+//  a) implement verification if the setpoint last requested to be set is the same as the one last
+//  read, if not try to fix it or report
 
 const MIN_TEMPERATURE_SETPOINT: Temperature = Temperature::Celsius(16i16);
+const TEMP_COOL_DOWN_DECREASE: Temperature = Temperature::Celsius(10i16);
 const BOOST_TEMPERATURE_DEFAULT: Temperature = Temperature::Celsius(24i16);
 const SETPOINT_MAX_TEMPERATURE_DEFAULT: Temperature = Temperature::Celsius(80i16);
 const BURNER_START_LOW_TRESHOLD: Temperature = Temperature::Celsius(6i16);
 const BURNER_STOP_HIGH_TRESHOLD: Temperature = Temperature::Celsius(8i16);
+const BURNER_BOOST_SETPOINT_DURTAION: Duration = Duration::from_secs(30);
 
 //  The function of boiler control is to maintaing boiler state connected over the OpenTherm
 //  interface
@@ -17,22 +24,45 @@ const BURNER_STOP_HIGH_TRESHOLD: Temperature = Temperature::Celsius(8i16);
 //  the burner due to high power used at that phase which is around 70-75%
 //  After around 15 seconds power can be modulated to lower values and can operate on its own.
 pub struct BoilerControl<D: OpenThermInterface> {
-    state: BoilerStatus,
+    state: BoilerState,
     communication_state: CommunicationState,
     device: D,
     boost_setpoint: Temperature,
     setpoint: Temperature,
     max_setpoint: Temperature,
-    burner_start_timestamp: u32,
     maintain_ch_state: CHState,
     flame_last_read: Option<FlameState>,
+    flame_start_timestamp: Option<Instant>,  //  TODO: Set to None if flame goes of, calculate and
+                                             //  store duration
+    flame_stop_timestamp: Option<Instant>,
 }
 
-enum BoilerStatus {
+#[derive(Debug)]
+enum BoilerError {
+    InvalidState,
+    MissingFlameStatus,
+}
+
+enum InputEvents {
+    FlameOn,
+    FlameSame,
+    FlameOff,
+    ChOn,
+    ChOff,
+    DwhOn,
+    DwhOff,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum BoilerState {
     Uninitialized, //  to be changed to type level programming
-    Idle,
-    BurnerStart,
+    StandBy,  //  where the CH = 0
+    Idle,   //  where the CH = 1
+    BurnerStartupBoost,
     BurnerModulation,
+    BurnerOffCooldown,
+    DwhActive,  //  flame active, CH = 0, DWH = 1,
+    ErrorStateTrap,
 }
 
 impl<D: OpenThermInterface> BoilerControl<D> {
@@ -43,25 +73,27 @@ impl<D: OpenThermInterface> BoilerControl<D> {
         //  read boiler versions ?
         //  read opentherm versions ?
         //  whichever is mandatory - multiple tries
-        //  let state: BoilerStatus::Idle;
+        //  let state: BoilerState::Idle;
         BoilerControl::<D> {
-            state: BoilerStatus::Idle,
+            state: BoilerState::Idle,
             communication_state: CommunicationState::StatusExchange,
             device: opentherm_device,
             boost_setpoint: BOOST_TEMPERATURE_DEFAULT,
             max_setpoint: SETPOINT_MAX_TEMPERATURE_DEFAULT,
             setpoint: MIN_TEMPERATURE_SETPOINT,
-            burner_start_timestamp: 0u32,
             maintain_ch_state: CHState::Enable(false),
             flame_last_read: None,
+            flame_start_timestamp: None,
+            flame_stop_timestamp: None,
         }
     }
 
-    fn set_point_control_internal(&mut self) -> Temperature {
+    fn set_point_control_internal(&self) -> Temperature {
         let temp_to_send = match self.state {
-            BoilerStatus::Uninitialized => MIN_TEMPERATURE_SETPOINT,
-            BoilerStatus::Idle | BoilerStatus::BurnerModulation => self.setpoint,
-            BoilerStatus::BurnerStart => self.setpoint + self.boost_setpoint,
+            BoilerState::Uninitialized | BoilerState::StandBy | BoilerState::ErrorStateTrap => MIN_TEMPERATURE_SETPOINT,
+            BoilerState::Idle | BoilerState::BurnerModulation | BoilerState::DwhActive => self.setpoint,
+            BoilerState::BurnerOffCooldown => self.setpoint - TEMP_COOL_DOWN_DECREASE,
+            BoilerState::BurnerStartupBoost => self.setpoint + self.boost_setpoint,
         };
         let temp_to_send = if temp_to_send < SETPOINT_MAX_TEMPERATURE_DEFAULT {
             temp_to_send
@@ -72,9 +104,176 @@ impl<D: OpenThermInterface> BoilerControl<D> {
         //  self.device.write(DataOt::BoilerTemperature(temp_to_send));
     }
 
-    fn state_transition(&mut self) {
+    //  Idle => BurnerStartupBoost
+    //  TODO:
+    //    a)return the information about the need to execute setpoint
+    //    b) Consider splitting transition to state and handling the transition actions for cleaner
+    //      approach
+    fn state_transition(&mut self, slave_status : Option<DataOt>) -> Result<(), BoilerError> {
         //  Check timer expirations and does maintain state transitions
-        //  BoilerStatus::Idle->BurenerStart->BurnerModulation
+        //  BoilerState::Idle->BurenerStart->BurnerModulation
+        let prev_state = self.state;
+        self.state = match self.state {
+            BoilerState::Uninitialized => {  //  -> BurnerStartupBoost / DwhActive
+                BoilerState::Idle
+            }
+            BoilerState::Idle => {  //  -> BurnerStartupBoost / DwhActive
+                //  a) flame goes up => BurnerStartupBoost or DwhActive
+                //  b) CH = 1 => BurnerStartupBoost
+                //  c) DWH = 1 => DwhActive
+                if let Some(DataOt::SlaveStatus(status)) = slave_status {
+                    if status.get_flame_active() == FlameState::Active(true)  {
+                        if status.get_ch_active() == CHState::Enable(true) {
+                            BoilerState::BurnerStartupBoost
+                        } else if status.get_dwh_active() == DWHState::Enable(true) {
+                            BoilerState::DwhActive
+                        }
+                        else {
+                            BoilerState::ErrorStateTrap
+                        }
+                    }
+                    else { // when flame is off do not change the state:
+                        self.state
+                    }
+                }
+                else { // When status is not given, preserve the state
+                       // TODO: maybe consider checking incorrect input argument
+                    self.state
+                }
+            },
+            BoilerState::BurnerStartupBoost => {  //  -> BurnerModulation / BurnerCooldown / DwhActive
+                //  a) timeout 30s => BurnerModulation
+                //  b) flame goes down => BurnerCooldown
+                //  c) flipping a switch ch -> dwh in status => DwhActive
+                match self.flame_start_timestamp {  //  Check if this should be turned off due to
+                                                    //  timeout
+                    Some(burner_start) if Instant::now().duration_since(burner_start) > BURNER_BOOST_SETPOINT_DURTAION => {
+                        todo!();   // check flame status and ch active bit here
+                        BoilerState::BurnerModulation
+                    }
+                    Some(burner_start) => { self.state },//  leave it as it was if the duration is
+                    //  shorter
+                    _ => {
+                        todo!();  //  Handle the critical state here. If the flame was detected it
+                                  //  the timesetamp vatiable should have Some(value)
+                                  //  The possible action is to do one cycle to process
+                                  //  ErrorStatTrape
+                                  //  with safety signals and after that turn off the boiler
+                        return Err(BoilerError::InvalidState);
+                    }
+                }
+            },
+            BoilerState::BurnerModulation => {  //  -> BurnerCooldown / DwhActive / Idle
+                //  a) flame goes down => BurnerCooldown
+                //  b) flipping a switch ch -> dwh in status => DwhActive
+                if let Some(DataOt::SlaveStatus(status)) = slave_status {
+                    if status.get_flame_active() == FlameState::Active(true)  {
+                        if status.get_ch_active() == CHState::Enable(true) {
+                            self.state  //  preserve
+                        } else if status.get_dwh_active() == DWHState::Enable(true) {
+                            BoilerState::DwhActive
+                        }
+                        else {
+                            BoilerState::ErrorStateTrap
+                        }
+                    }
+                    else { // when flame is off go to cool down state
+                        self.flame_stop_timestamp = Some(Instant::now());
+                        BoilerState::BurnerOffCooldown
+                    }
+                }
+                else { // When status is not given, preserve the state
+                       // TODO: maybe consider checking incorrect input argument
+                    self.state
+                }
+            },
+            BoilerState::BurnerOffCooldown => {  //  -> Idle / DwhActive
+                if let Some(DataOt::SlaveStatus(status)) = slave_status {
+                    if status.get_flame_active() == FlameState::Active(true)  {
+                        if status.get_dwh_active() == DWHState::Enable(true) {
+                            BoilerState::DwhActive
+                        }
+                        else {
+                            todo!();  // not expected non-DWH
+                            self.state
+                        }
+                    }
+                    else {
+                        self.state
+                    }
+                }
+                else {
+                    self.state
+                }
+            },
+            BoilerState::StandBy => {  //  -> Idle(CH=1) / DwhActive(dwh=1)  TODO: check dhw state
+                //  Standby is then the CH = 0, DWH = 0 and flame is OFF
+                todo!();
+                self.state
+            },
+            BoilerState::DwhActive => {
+                //  fn handle_dwh_active_state_transition(slave_status: DataOt)
+                //  handle_dwh_active_state_transition(slave_status)
+                let new_self_state = if let Some(DataOt::SlaveStatus(status)) = slave_status {
+                    let intermediate_self_state = if status.get_flame_active() == FlameState::Active(true)  {
+                        if status.get_dwh_active() == DWHState::Enable(false) {
+                            //  handle situation:
+                            todo!();
+                            self.state
+                        }
+                        else {
+                            todo!();
+                            self.state
+                        }
+                    }
+                    else {
+                        BoilerState::Idle
+                    };
+                    intermediate_self_state
+                }
+                else {
+                    self.state
+                };
+                new_self_state
+            }
+            BoilerState::ErrorStateTrap => {
+                self.state
+            },
+            //  s => s,
+        };
+        if prev_state != self.state {
+            log::info!("Boiler State Transition: {:?}->{:?}", prev_state, self.state);
+        }
+
+        todo!();  // redundant conditions. Does it make sense?
+        if let Some(DataOt::SlaveStatus(status)) = slave_status {
+            let flame_read_status = status.get_flame_active();
+            match self.flame_last_read {
+                Some(flame_prev) if flame_prev != flame_read_status => {
+                    self.state = BoilerState::BurnerStartupBoost;
+                    self.flame_last_read = Some(flame_read_status);
+                    self.flame_start_timestamp = Some(Instant::now());
+                },
+                Some(_) => {},
+                None => self.flame_last_read = Some(flame_read_status),
+            }
+        }
+        //  The state change may also come from external condition of a statte change in
+        //  the boiler itself
+        self.state = match self.flame_last_read {
+            Some(flame) if flame == FlameState::Active(false) => {
+                //  Flame was detected to go off:
+                BoilerState::BurnerOffCooldown
+            },
+            Some(_) => {
+                self.state   //  leave the same state as before
+            },
+            None => {
+                log::error!("Error: boiler should have flame status at this point");
+                return Err(BoilerError::MissingFlameStatus);
+            }
+        };
+        Ok(())
     }
 
     pub fn enable_ch(&mut self, enable: CHState) -> Result<(), OtError> {
@@ -109,8 +308,8 @@ impl<D: OpenThermInterface> BoilerControl<D> {
         //  }
         //////////////////////////////////////////////////////////////////////////
 
-        self.state_transition(); //  check timer expiration and realize
-                                 //  BoilerStatus::BurnerStart->BurnerModulation transition
+        self.state_transition(None); //  check timer expiration and realize
+                                 //  BoilerState::BurnerStartupBoost->BurnerModulation transition
         let new_state = match self.communication_state {
             CommunicationState::StatusExchange => {
                 //  log::info("Boiler p
@@ -124,20 +323,7 @@ impl<D: OpenThermInterface> BoilerControl<D> {
                 log::info!("Boiler Controller sends data: {:?}", master_status);
                 if let Ok(expected_slave_status) = self.device.read(DataOt::MasterStatus(master_status)).await {
                     log::info!("Boiler Controller got back data: {:?}", expected_slave_status);
-                    match expected_slave_status {
-                        DataOt::SlaveStatus(status) => {
-                            let flame_read_status = status.get_flame_active();
-                            match self.flame_last_read {
-                                Some(flame_prev) if flame_prev != flame_read_status => {
-                                    todo!();   //  make state transition here
-                                },
-                                Some(_) => {},
-                                None => self.flame_last_read = Some(flame_read_status),
-                            }
-                        }
-                        _ => {
-                        }
-                    }
+                    self.state_transition(Some(expected_slave_status)); //  check timer expiration and realize
 
                 } else {
                     log::error!("Boiler failed to report Status!");

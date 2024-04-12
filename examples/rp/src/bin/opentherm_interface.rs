@@ -1,17 +1,11 @@
+#![cfg_attr(not(test), no_std)]
 use core::convert::From;
 use core::convert::TryFrom;
-use core::ops::{Add, Sub};
-
-//  use bytes::Buf;
-
-//  use bit_set::BitSet;
-//  use bitset_core::BitSet;
-// use bitvec::prelude::*;
-
-//  use byteorder::{ByteOrder, LittleEndian};
+use core::ops::{Add, Sub, Mul};
 
 //  TODO:
 //  - Still: detect burner start transition based on mapped OpenTherm responses
+//  - Possibly: use serde for protocol serialization and deserialization
 
 pub const CAPTURE_OT_FRAME_PAYLOAD_SIZE: usize = 32_usize;
 pub const MESSAGE_DATA_VALUE_BIT_LEN: usize = 16_usize;
@@ -289,6 +283,12 @@ impl SlaveStatus {
     }
     pub fn get_flame_active(&self) -> FlameState {
         self.flame_active
+    }
+    pub fn get_dwh_active(&self) -> DWHState {
+        self.dwh_active
+    }
+    pub fn get_ch_active(&self) -> CHState {
+        self.ch_active
     }
 }
 
@@ -796,6 +796,18 @@ pub enum CommunicationState {
 #[derive(PartialEq, PartialOrd, Clone, Copy, Debug)]
 pub enum Temperature {
     Celsius(i16),
+}
+
+impl Mul<Temperature> for i16 {
+    type Output = Temperature;
+    fn mul(self, rhs: Temperature) -> Self::Output {
+        if let Temperature::Celsius(t) = rhs {
+            Temperature::Celsius(self*t)
+        }
+        else {
+            todo!()
+        }
+    }
 }
 
 impl Sub for Temperature {

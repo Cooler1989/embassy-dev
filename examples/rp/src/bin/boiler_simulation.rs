@@ -7,7 +7,7 @@ use crate::opentherm_interface::{DWHState, FlameState, SlaveStatus};
 use embassy_time::{Duration, Instant, Timer};
 
 const TEMP_CHANGE_VALUE: Temperature = Temperature::Celsius(1);
-const TEMP_CHANGE_RATE: Duration = Duration::from_secs(10);
+const TEMP_CHANGE_RATE: Duration = Duration::from_secs(20);
 const BOILER_MAX_TEMP: Temperature = Temperature::Celsius(60);
 const TEMP_UPPER_TURN_OFF_HIST: Temperature = Temperature::Celsius(8);
 const TEMP_LOWER_TURN_ON_HIST: Temperature = Temperature::Celsius(6);
@@ -39,13 +39,13 @@ impl BoilerSimulation {
         let period_last_call = Instant::now().duration_since(self.last_process_call);
         //  only update state after at least a second interval
         if period_last_call > TEMP_CHANGE_RATE {
-            self.last_process_call = Instant::now();
-            // elevate integer calculation 1000 times
+            let change_temperature = (period_last_call.as_ticks() / TEMP_CHANGE_RATE.as_ticks()) as i16 * TEMP_CHANGE_VALUE;
             if self.flame == FlameState::Active(true) {
-                self.boiler_temperature = self.boiler_temperature + TEMP_CHANGE_VALUE;
+                self.boiler_temperature = self.boiler_temperature + change_temperature;
             } else {
-                self.boiler_temperature = self.boiler_temperature - TEMP_CHANGE_VALUE;
+                self.boiler_temperature = self.boiler_temperature - change_temperature;
             }
+            self.last_process_call = Instant::now();
         }
 
         // update the boiler state
@@ -53,15 +53,18 @@ impl BoilerSimulation {
             t if self.flame == FlameState::Active(true)
                     && t >= self.setpoint + TEMP_UPPER_TURN_OFF_HIST =>
             {
+                log::info!("BS: Flame OFF");
                 FlameState::Active(false)
             }
             t if self.flame == FlameState::Active(false)
                     && t <= self.setpoint - TEMP_LOWER_TURN_ON_HIST =>
             {
+                log::info!("BS: Flame ON");
                 FlameState::Active(true)
             }
             Temperature::Celsius(_) => self.flame,
         };
+        log::info!("BS: temp: {:?}, flame: {:?}", self.boiler_temperature, self.flame);
     }
 
     //  accepts OpenTherm message

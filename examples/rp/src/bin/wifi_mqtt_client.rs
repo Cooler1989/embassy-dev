@@ -11,9 +11,11 @@ use cyw43_pio::PioSpi;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
+use embassy_net::Ipv4Address;
 use embassy_net::{Config, Stack, StackResources};
-use embassy_net::{Ipv4Address};
 use embassy_rp::bind_interrupts;
+//  use embassy_rp::peripherals::USB;
+//  use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIN_23, PIN_25, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
@@ -21,18 +23,19 @@ use embassy_time::{Duration, Timer};
 //  use embedded_io_async::Write;
 //  use rand_core::RngCore;
 use embassy_rp::clocks::RoscRng;
-use static_cell::StaticCell;
 use heapless::String;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 use rust_mqtt::{
-    client::{client::MqttClient, client_config::{ClientConfig}},
+    client::{client::MqttClient, client_config::ClientConfig},
     packet::v5::reason_codes::ReasonCode,
     //  utils::rng_generator::CountingRng,
 };
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
+    //  USBCTRL_IRQ => UsbInterruptHandler<USB>;
 });
 
 const WIFI_NETWORK: &str = "devsimple";
@@ -40,6 +43,11 @@ const WIFI_PASSWORD: &str = "hackallkindles";
 
 //  const ENDPOINT: &'static str = include_str!("../secrets/endpoint.txt");
 const CLIENT_ID: &'static str = "client_id";
+
+//  #[embassy_executor::task]
+//  async fn logger_task(driver: Driver<'static, USB>) {
+//      embassy_usb_logger::run!(2048, log::LevelFilter::Info, driver);
+//  }
 
 #[embassy_executor::task]
 async fn wifi_task(
@@ -55,9 +63,13 @@ async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Hello World!");
-
     let p = embassy_rp::init(Default::default());
+
+    //  let driver = Driver::new(p.USB, Irqs);
+    //  spawner.spawn(logger_task(driver)).unwrap();
+
+    Timer::after_millis(500).await;
+    //  log::info!("Hello World!");
 
     let fw = include_bytes!("../../../../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../../../../cyw43-firmware/43439A0_clm.bin");
@@ -110,17 +122,17 @@ async fn main(spawner: Spawner) {
         match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
             Ok(_) => break,
             Err(err) => {
-                info!("join failed with status={}", err.status);
+                //  log::info!("join failed with status={}", err.status);
             }
         }
     }
 
     // Wait for DHCP, not necessary when using static IP
-    info!("waiting for DHCP...");
+    //  log::info!("waiting for DHCP...");
     while !stack.is_config_up() {
         Timer::after_millis(100).await;
     }
-    info!("DHCP is now up!");
+    //  log::info!("DHCP is now up!");
 
     // And now we can use it!
 
@@ -134,38 +146,34 @@ async fn main(spawner: Spawner) {
         control.gpio_set(0, false).await;
 
         let remote_endpoint = (Ipv4Address::new(192, 168, 7, 1), 8000);
-        info!("connecting...");
+        //  log::info!("connecting...");
         let r = socket.connect(remote_endpoint).await;
         if let Err(e) = r {
-            info!("connect error: {:?}", e);
+            //  log::info!("connect error: {:?}", e);
             Timer::after_secs(1).await;
             continue;
         }
-        info!("connected!");
+        //  log::info!("connected!");
 
         let rng = RoscRng;
-        let mut config = ClientConfig::<5, RoscRng>::new(
-            rust_mqtt::client::client_config::MqttVersion::MQTTv5,
-            rng
-        );
+        let mut config = ClientConfig::<5, RoscRng>::new(rust_mqtt::client::client_config::MqttVersion::MQTTv5, rng);
         config.add_max_subscribe_qos(rust_mqtt::packet::v5::publish_packet::QualityOfService::QoS1);
         config.add_client_id(CLIENT_ID);
         config.max_packet_size = 100;
         let mut recv_buffer = [0; 80];
         let mut write_buffer = [0; 80];
 
-        let mut client =
-            MqttClient::<_, 5, _>::new(socket, &mut write_buffer, 80, &mut recv_buffer, 80, config);
+        let mut client = MqttClient::<_, 5, _>::new(socket, &mut write_buffer, 80, &mut recv_buffer, 80, config);
 
         match client.connect_to_broker().await {
             Ok(()) => {}
             Err(mqtt_error) => match mqtt_error {
                 ReasonCode::NetworkError => {
-                    log::info!("MQTT Network Error");
+                    //  log::info!("MQTT Network Error");
                     continue;
                 }
                 _ => {
-                    log::info!("Other MQTT Error: {:?}", mqtt_error);
+                    //  log::info!("Other MQTT Error: {:?}", mqtt_error);
                     continue;
                 }
             },
@@ -187,11 +195,11 @@ async fn main(spawner: Spawner) {
                 Ok(()) => {}
                 Err(mqtt_error) => match mqtt_error {
                     ReasonCode::NetworkError => {
-                        log::info!("MQTT Network Error");
+                        //  log::info!("MQTT Network Error");
                         continue;
                     }
                     _ => {
-                        log::info!("Other MQTT Error: {:?}", mqtt_error);
+                        //  log::info!("Other MQTT Error: {:?}", mqtt_error);
                         continue;
                     }
                 },

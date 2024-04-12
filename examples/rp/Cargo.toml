@@ -21,7 +21,6 @@ embassy-usb-logger = { version = "0.1.0", path = "../../embassy-usb-logger" }
 cyw43 = { path = "../../cyw43", features = ["defmt", "firmware-logs"] }
 cyw43-pio = { path = "../../cyw43-pio", features = ["defmt", "overclock"] }
 embassy-opentherm = { version = "0.1.0", path = "../../embassy-opentherm", features = ["defmt"] }
-
 defmt = "0.3"
 defmt-rtt = "0.4"
 fixed = "1.23.1"
@@ -30,7 +29,6 @@ fixed-macro = "1.2"
 rust-mqtt = { version = "0.2.0", default-features = false }
 
 #  mqttrust = "0.6"
-
 # bitset-core = "0.1.1"
 
 #cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }

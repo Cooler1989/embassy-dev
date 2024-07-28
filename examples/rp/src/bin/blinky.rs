@@ -11,6 +11,7 @@ use embassy_rp::gpio;
 use embassy_time::Timer;
 use gpio::{Level, Output};
 use {defmt_rtt as _, panic_probe as _};
+use cortex_m_semihosting::hprintln;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -19,10 +20,12 @@ async fn main(_spawner: Spawner) {
 
     loop {
         info!("led on!");
+        hprintln!("led on!");
         led.set_high();
         Timer::after_secs(1).await;
 
         info!("led off!");
+        hprintln!("led off!");
         led.set_low();
         Timer::after_secs(1).await;
     }

@@ -15,11 +15,14 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_rp::peripherals::USB;
+use embassy_rp::usb::{Driver, InterruptHandler as InterruptHandlerUSB};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
+    USBCTRL_IRQ => InterruptHandlerUSB<USB>;
 });
 
 #[embassy_executor::task]
@@ -30,6 +33,11 @@ async fn wifi_task(runner: cyw43::Runner<'static, Output<'static>, PioSpi<'stati
 #[embassy_executor::task]
 async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
     stack.run().await
+}
+
+#[embassy_executor::task]
+async fn logger_task(driver: Driver<'static, USB>) {
+    embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
 }
 
 #[embassy_executor::main]
@@ -52,6 +60,9 @@ async fn main(spawner: Spawner) {
     let cs = Output::new(p.PIN_25, Level::High);
     let mut pio = Pio::new(p.PIO0, Irqs);
     let spi = PioSpi::new(&mut pio.common, pio.sm0, pio.irq0, cs, p.PIN_24, p.PIN_29, p.DMA_CH0);
+    let driver = Driver::new(p.USB, Irqs);
+
+    spawner.spawn(logger_task(driver)).unwrap();
 
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
@@ -67,6 +78,8 @@ async fn main(spawner: Spawner) {
     while let Some(bss) = scanner.next().await {
         if let Ok(ssid_str) = str::from_utf8(&bss.ssid) {
             info!("scanned {} == {:x}", ssid_str, bss.bssid);
+            //  log::info!("Tick {}", counter);
+            log::info!("scanned {} == {}", ssid_str, "bssid");
         }
     }
 }

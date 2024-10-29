@@ -6,27 +6,50 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
+use embassy_rp::i2c::InterruptHandler as I2cInterruptHandler;
 use embassy_rp::bind_interrupts;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_time::Timer;
+use embassy_rp::gpio;
+use gpio::{Level, Output};
 use embassy_usb::class::hid::{HidReaderWriter, ReportId, RequestHandler, State};
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config, Handler};
 use rand::Rng;
+use static_cell::StaticCell;
 use usbd_hid::descriptor::{MouseReport, SerializedDescriptor};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::channel::{Channel, Receiver, Sender};
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
+    I2C1_IRQ => I2cInterruptHandler<embassy_rp::peripherals::I2C1>;
 });
+
+const MIDDLE_POSITION : u8 = 0;
+
+enum MotorRoller458 {
+    First = 0x64,
+}
+impl Into<u16> for MotorRoller458 {
+    fn into(self) -> u16 {
+        0x64
+    }
+}
+
+struct ScrollDiff(i8);
+
+static CHANNEL: StaticCell<Channel<NoopRawMutex, ScrollDiff, 1>> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USB, Irqs);
+    let channel = CHANNEL.init(Channel::new());
 
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
@@ -81,20 +104,27 @@ async fn main(_spawner: Spawner) {
         let mut rng = RoscRng;
 
         loop {
-            // every 1 second
-            _ = Timer::after_secs(1).await;
-            let report = MouseReport {
-                buttons: 0,
-                x: rng.gen_range(-100..100), // random small x movement
-                y: rng.gen_range(-100..100), // random small y movement
-                wheel: 0,
-                pan: 0,
+            //  receive
+            match channel.receiver().receive().await {
+                ScrollDiff(scroll_diff) => {
+                    let report = MouseReport {
+                        buttons: 0,
+                        //  x: rng.gen_range(-40..40), // random small x movement
+                        x: 0,
+                        y: 0,
+                        //  y: rng.gen_range(-40..40), // random small y movement
+                        //  wheel: rng.gen_range(-10..10), // random small scroll movement
+                        wheel: scroll_diff,
+                        pan: 0,
+                    };
+                    // Send the report.
+                    match writer.write_serialize(&report).await {
+                        Ok(()) => {}
+                        Err(e) => warn!("Failed to send report: {:?}", e),
+                    }
+                }
             };
-            // Send the report.
-            match writer.write_serialize(&report).await {
-                Ok(()) => {}
-                Err(e) => warn!("Failed to send report: {:?}", e),
-            }
+            _ = Timer::after_millis(100).await;
         }
     };
 
@@ -102,9 +132,114 @@ async fn main(_spawner: Spawner) {
         reader.run(false, &mut request_handler).await;
     };
 
+    let mut led = Output::new(p.PIN_25, Level::Low);
+    let led_toggler = async {
+        loop {
+            //  info!("wait_for_high. Turn on LED");
+            led.toggle();
+            _ = Timer::after_secs(1).await;
+        }
+    };
+
+    // Setup i2c driver:
+    let sda = p.PIN_14;
+    let scl = p.PIN_15;
+
+    let config = embassy_rp::i2c::Config::default();
+    let mut bus = embassy_rp::i2c::I2c::new_async(p.I2C1, scl, sda, Irqs, config);
+
+    let motor_control_loop = async {
+
+        //  Read buffer
+        let write_buffer: [u8;1] = [0x01];
+        let mut read_buffer: [u8;1] = [0; 1];
+        let result = bus
+            .write_read_async(MotorRoller458::First, write_buffer, &mut read_buffer)
+            .await;
+        match result {
+            Ok(()) => {
+                //  log::info!("Read results: {}, {}", read_buffer[0], read_buffer[1]);
+            },
+            Err(_err) => {
+                loop{};
+            }
+        }
+        _ = Timer::after_secs(1).await;
+
+        //  Set position:
+        let write_buffer: [u8;5] = [0x80, 0x00, MIDDLE_POSITION/*position*/, 0x00, 0x00];  //  select register
+        let result = bus
+            .write_async(MotorRoller458::First, write_buffer)
+            .await;
+        match result {
+            Ok(()) => {
+                log::info!("Read results Ok");
+            },
+            Err(_err) => {
+                loop{};
+            }
+        }
+
+        //  Set motor mode to position:
+        let write_buffer: [u8;2] = [0x01, 0x02];
+        let result = bus
+            .write_async(MotorRoller458::First, write_buffer)
+            .await;
+        match result {
+            Ok(()) => {
+                //  log::info!("Write results Ok");
+            },
+            Err(_err) => {
+                loop{};
+            }
+        }
+
+        _ = Timer::after_secs(1).await;
+        //  Motor ON:
+        let write_buffer: [u8;2] = [0x00, 0x01];
+        let result = bus
+            .write_async(MotorRoller458::First, write_buffer)
+            .await;
+        match result {
+            Ok(()) => {
+                //  log::info!("Write results Ok");
+            },
+            Err(_err) => {
+                loop{};
+            }
+        }
+        _ = Timer::after_secs(1).await;
+
+        loop {
+            //  Read position:
+            let write_buffer: [u8;1] = [0x90];  //  Register value
+            let mut read_buffer: [u8;4] = [0; 4];
+            let result = bus
+                .write_read_async(MotorRoller458::First, write_buffer, &mut read_buffer)
+                .await;
+            match result {
+                Ok(()) => {
+                    log::info!("Read results: {}, {}", read_buffer[0], read_buffer[1]);
+                    let position = (read_buffer[2] as i16) - (MIDDLE_POSITION as i16);
+                    //  Get motor position,
+                    //  Send diff data:
+                    channel.sender().send(ScrollDiff(position as i8)).await;
+                },
+                Err(_err) => {
+                    loop{};
+                }
+            }
+            _ = Timer::after_millis(100).await;
+        }
+    };
+
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join(usb_fut, join(in_fut, out_fut)).await;
+    join(usb_fut,
+        join(in_fut,
+            join(out_fut,
+                join(led_toggler,
+                    motor_control_loop)))).await;
 }
 
 struct MyRequestHandler {}

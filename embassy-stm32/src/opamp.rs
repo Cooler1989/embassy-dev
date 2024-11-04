@@ -1,9 +1,13 @@
+//! Operational Amplifier (OPAMP)
 #![macro_use]
 
 use embassy_hal_internal::{into_ref, PeripheralRef};
 
+use crate::pac::opamp::vals::*;
 use crate::Peripheral;
 
+/// Gain
+#[allow(missing_docs)]
 #[derive(Clone, Copy)]
 pub enum OpAmpGain {
     Mul1,
@@ -13,6 +17,8 @@ pub enum OpAmpGain {
     Mul16,
 }
 
+/// Speed
+#[allow(missing_docs)]
 #[derive(Clone, Copy)]
 pub enum OpAmpSpeed {
     Normal,
@@ -20,11 +26,11 @@ pub enum OpAmpSpeed {
 }
 
 #[cfg(opamp_g4)]
-impl From<OpAmpSpeed> for crate::pac::opamp::vals::OpampCsrOpahsm {
+impl From<OpAmpSpeed> for crate::pac::opamp::vals::Opahsm {
     fn from(v: OpAmpSpeed) -> Self {
         match v {
-            OpAmpSpeed::Normal => crate::pac::opamp::vals::OpampCsrOpahsm::NORMAL,
-            OpAmpSpeed::HighSpeed => crate::pac::opamp::vals::OpampCsrOpahsm::HIGHSPEED,
+            OpAmpSpeed::Normal => crate::pac::opamp::vals::Opahsm::NORMAL,
+            OpAmpSpeed::HighSpeed => crate::pac::opamp::vals::Opahsm::HIGHSPEED,
         }
     }
 }
@@ -39,6 +45,7 @@ pub struct OpAmpOutput<'d, T: Instance> {
 /// OpAmp internal outputs, wired directly to ADC inputs.
 ///
 /// This struct can be used as an ADC input.
+#[cfg(opamp_g4)]
 pub struct OpAmpInternalOutput<'d, T: Instance> {
     _inner: &'d OpAmp<'d, T>,
 }
@@ -56,7 +63,7 @@ impl<'d, T: Instance> OpAmp<'d, T> {
         into_ref!(opamp);
 
         #[cfg(opamp_g4)]
-        T::regs().opamp_csr().modify(|w| {
+        T::regs().csr().modify(|w| {
             w.set_opahsm(speed.into());
         });
 
@@ -74,16 +81,17 @@ impl<'d, T: Instance> OpAmp<'d, T> {
     /// directly used as an ADC input. The opamp will be disabled when the
     /// [`OpAmpOutput`] is dropped.
     pub fn buffer_ext(
-        &'d mut self,
-        in_pin: impl Peripheral<P = impl NonInvertingPin<T> + crate::gpio::sealed::Pin>,
-        out_pin: impl Peripheral<P = impl OutputPin<T> + crate::gpio::sealed::Pin> + 'd,
+        &mut self,
+        in_pin: impl Peripheral<P = impl NonInvertingPin<T> + crate::gpio::Pin>,
+        out_pin: impl Peripheral<P = impl OutputPin<T> + crate::gpio::Pin>,
         gain: OpAmpGain,
-    ) -> OpAmpOutput<'d, T> {
+    ) -> OpAmpOutput<'_, T> {
         into_ref!(in_pin);
         into_ref!(out_pin);
         in_pin.set_as_analog();
         out_pin.set_as_analog();
 
+        // PGA_GAIN value may have different meaning in different MCU serials, use with caution.
         let (vm_sel, pga_gain) = match gain {
             OpAmpGain::Mul1 => (0b11, 0b00),
             OpAmpGain::Mul2 => (0b10, 0b00),
@@ -92,23 +100,39 @@ impl<'d, T: Instance> OpAmp<'d, T> {
             OpAmpGain::Mul16 => (0b10, 0b11),
         };
 
-        #[cfg(opamp_f3)]
-        T::regs().opampcsr().modify(|w| {
-            w.set_vp_sel(in_pin.channel());
-            w.set_vm_sel(vm_sel);
-            w.set_pga_gain(pga_gain);
+        T::regs().csr().modify(|w| {
+            w.set_vp_sel(VpSel::from_bits(in_pin.channel()));
+            w.set_vm_sel(VmSel::from_bits(vm_sel));
+            w.set_pga_gain(PgaGain::from_bits(pga_gain));
+            #[cfg(opamp_g4)]
+            w.set_opaintoen(Opaintoen::OUTPUTPIN);
             w.set_opampen(true);
         });
 
-        #[cfg(opamp_g4)]
-        T::regs().opamp_csr().modify(|w| {
+        OpAmpOutput { _inner: self }
+    }
+    /// Configure the OpAmp as a buffer for the DAC it is connected to,
+    /// outputting to the provided output pin, and enable the opamp.
+    ///
+    /// The output pin is held within the returned [`OpAmpOutput`] struct,
+    /// preventing it being used elsewhere. The `OpAmpOutput` can then be
+    /// directly used as an ADC input. The opamp will be disabled when the
+    /// [`OpAmpOutput`] is dropped.
+    #[cfg(opamp_g4)]
+    pub fn buffer_dac(
+        &mut self,
+        out_pin: impl Peripheral<P = impl OutputPin<T> + crate::gpio::Pin>,
+    ) -> OpAmpOutput<'_, T> {
+        into_ref!(out_pin);
+        out_pin.set_as_analog();
+
+        T::regs().csr().modify(|w| {
             use crate::pac::opamp::vals::*;
 
-            w.set_vp_sel(OpampCsrVpSel::from_bits(in_pin.channel()));
-            w.set_vm_sel(OpampCsrVmSel::from_bits(vm_sel));
-            w.set_pga_gain(OpampCsrPgaGain::from_bits(pga_gain));
-            w.set_opaintoen(OpampCsrOpaintoen::OUTPUTPIN);
-            w.set_opaen(true);
+            w.set_vm_sel(VmSel::OUTPUT);
+            w.set_vp_sel(VpSel::DAC3_CH1);
+            w.set_opaintoen(Opaintoen::OUTPUTPIN);
+            w.set_opampen(true);
         });
 
         OpAmpOutput { _inner: self }
@@ -124,13 +148,14 @@ impl<'d, T: Instance> OpAmp<'d, T> {
     /// The opamp output will be disabled when it is dropped.
     #[cfg(opamp_g4)]
     pub fn buffer_int(
-        &'d mut self,
-        pin: impl Peripheral<P = impl NonInvertingPin<T> + crate::gpio::sealed::Pin>,
+        &mut self,
+        pin: impl Peripheral<P = impl NonInvertingPin<T> + crate::gpio::Pin>,
         gain: OpAmpGain,
-    ) -> OpAmpInternalOutput<'d, T> {
+    ) -> OpAmpInternalOutput<'_, T> {
         into_ref!(pin);
         pin.set_as_analog();
 
+        // PGA_GAIN value may have different meaning in different MCU serials, use with caution.
         let (vm_sel, pga_gain) = match gain {
             OpAmpGain::Mul1 => (0b11, 0b00),
             OpAmpGain::Mul2 => (0b10, 0b00),
@@ -139,13 +164,13 @@ impl<'d, T: Instance> OpAmp<'d, T> {
             OpAmpGain::Mul16 => (0b10, 0b11),
         };
 
-        T::regs().opamp_csr().modify(|w| {
+        T::regs().csr().modify(|w| {
             use crate::pac::opamp::vals::*;
-            w.set_vp_sel(OpampCsrVpSel::from_bits(pin.channel()));
-            w.set_vm_sel(OpampCsrVmSel::from_bits(vm_sel));
-            w.set_pga_gain(OpampCsrPgaGain::from_bits(pga_gain));
-            w.set_opaintoen(OpampCsrOpaintoen::ADCCHANNEL);
-            w.set_opaen(true);
+            w.set_vp_sel(VpSel::from_bits(pin.channel()));
+            w.set_vm_sel(VmSel::from_bits(vm_sel));
+            w.set_pga_gain(PgaGain::from_bits(pga_gain));
+            w.set_opaintoen(Opaintoen::ADCCHANNEL);
+            w.set_opampen(true);
         });
 
         OpAmpInternalOutput { _inner: self }
@@ -154,59 +179,54 @@ impl<'d, T: Instance> OpAmp<'d, T> {
 
 impl<'d, T: Instance> Drop for OpAmpOutput<'d, T> {
     fn drop(&mut self) {
-        #[cfg(opamp_f3)]
-        T::regs().opampcsr().modify(|w| {
+        T::regs().csr().modify(|w| {
             w.set_opampen(false);
-        });
-
-        #[cfg(opamp_g4)]
-        T::regs().opamp_csr().modify(|w| {
-            w.set_opaen(false);
         });
     }
 }
 
+#[cfg(opamp_g4)]
 impl<'d, T: Instance> Drop for OpAmpInternalOutput<'d, T> {
     fn drop(&mut self) {
-        #[cfg(opamp_f3)]
-        T::regs().opampcsr().modify(|w| {
+        T::regs().csr().modify(|w| {
             w.set_opampen(false);
         });
-
-        #[cfg(opamp_g4)]
-        T::regs().opamp_csr().modify(|w| {
-            w.set_opaen(false);
-        });
     }
 }
 
-pub trait Instance: sealed::Instance + 'static {}
-
-pub(crate) mod sealed {
-    pub trait Instance {
-        fn regs() -> crate::pac::opamp::Opamp;
-    }
-
-    pub trait NonInvertingPin<T: Instance> {
-        fn channel(&self) -> u8;
-    }
-
-    pub trait InvertingPin<T: Instance> {
-        fn channel(&self) -> u8;
-    }
-
-    pub trait OutputPin<T: Instance> {}
+pub(crate) trait SealedInstance {
+    fn regs() -> crate::pac::opamp::Opamp;
 }
 
-pub trait NonInvertingPin<T: Instance>: sealed::NonInvertingPin<T> {}
-pub trait InvertingPin<T: Instance>: sealed::InvertingPin<T> {}
-pub trait OutputPin<T: Instance>: sealed::OutputPin<T> {}
+pub(crate) trait SealedNonInvertingPin<T: Instance> {
+    fn channel(&self) -> u8;
+}
+
+pub(crate) trait SealedInvertingPin<T: Instance> {
+    #[allow(unused)]
+    fn channel(&self) -> u8;
+}
+
+pub(crate) trait SealedOutputPin<T: Instance> {}
+
+/// Opamp instance trait.
+#[allow(private_bounds)]
+pub trait Instance: SealedInstance + 'static {}
+/// Non-inverting pin trait.
+#[allow(private_bounds)]
+pub trait NonInvertingPin<T: Instance>: SealedNonInvertingPin<T> {}
+/// Inverting pin trait.
+#[allow(private_bounds)]
+pub trait InvertingPin<T: Instance>: SealedInvertingPin<T> {}
+/// Output pin trait.
+#[allow(private_bounds)]
+pub trait OutputPin<T: Instance>: SealedOutputPin<T> {}
 
 macro_rules! impl_opamp_external_output {
     ($inst:ident, $adc:ident, $ch:expr) => {
         foreach_adc!(
             ($adc, $common_inst:ident, $adc_clock:ident) => {
-                impl<'d> crate::adc::sealed::AdcPin<crate::peripherals::$adc>
+                impl<'d> crate::adc::SealedAdcChannel<crate::peripherals::$adc>
                     for OpAmpOutput<'d, crate::peripherals::$inst>
                 {
                     fn channel(&self) -> u8 {
@@ -214,7 +234,7 @@ macro_rules! impl_opamp_external_output {
                     }
                 }
 
-                impl<'d> crate::adc::AdcPin<crate::peripherals::$adc>
+                impl<'d> crate::adc::AdcChannel<crate::peripherals::$adc>
                     for OpAmpOutput<'d, crate::peripherals::$inst>
                 {
                 }
@@ -252,7 +272,7 @@ macro_rules! impl_opamp_internal_output {
     ($inst:ident, $adc:ident, $ch:expr) => {
         foreach_adc!(
             ($adc, $common_inst:ident, $adc_clock:ident) => {
-                impl<'d> crate::adc::sealed::AdcPin<crate::peripherals::$adc>
+                impl<'d> crate::adc::SealedAdcChannel<crate::peripherals::$adc>
                     for OpAmpInternalOutput<'d, crate::peripherals::$inst>
                 {
                     fn channel(&self) -> u8 {
@@ -260,7 +280,7 @@ macro_rules! impl_opamp_internal_output {
                     }
                 }
 
-                impl<'d> crate::adc::AdcPin<crate::peripherals::$adc>
+                impl<'d> crate::adc::AdcChannel<crate::peripherals::$adc>
                     for OpAmpInternalOutput<'d, crate::peripherals::$inst>
                 {
                 }
@@ -301,7 +321,7 @@ foreach_peripheral!(
 
 foreach_peripheral! {
     (opamp, $inst:ident) => {
-        impl sealed::Instance for crate::peripherals::$inst {
+        impl SealedInstance for crate::peripherals::$inst {
             fn regs() -> crate::pac::opamp::Opamp {
                 crate::pac::$inst
             }
@@ -316,7 +336,7 @@ foreach_peripheral! {
 macro_rules! impl_opamp_vp_pin {
     ($inst:ident, $pin:ident, $ch:expr) => {
         impl crate::opamp::NonInvertingPin<peripherals::$inst> for crate::peripherals::$pin {}
-        impl crate::opamp::sealed::NonInvertingPin<peripherals::$inst> for crate::peripherals::$pin {
+        impl crate::opamp::SealedNonInvertingPin<peripherals::$inst> for crate::peripherals::$pin {
             fn channel(&self) -> u8 {
                 $ch
             }
@@ -328,6 +348,6 @@ macro_rules! impl_opamp_vp_pin {
 macro_rules! impl_opamp_vout_pin {
     ($inst:ident, $pin:ident) => {
         impl crate::opamp::OutputPin<peripherals::$inst> for crate::peripherals::$pin {}
-        impl crate::opamp::sealed::OutputPin<peripherals::$inst> for crate::peripherals::$pin {}
+        impl crate::opamp::SealedOutputPin<peripherals::$inst> for crate::peripherals::$pin {}
     };
 }

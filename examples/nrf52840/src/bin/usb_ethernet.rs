@@ -1,13 +1,12 @@
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 
 use core::mem;
 
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Stack, StackResources};
+use embassy_net::StackResources;
 use embassy_nrf::rng::Rng;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::Driver;
@@ -16,7 +15,7 @@ use embassy_usb::class::cdc_ncm::embassy_net::{Device, Runner, State as NetState
 use embassy_usb::class::cdc_ncm::{CdcNcmClass, State};
 use embassy_usb::{Builder, Config, UsbDevice};
 use embedded_io_async::Write;
-use static_cell::make_static;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -40,8 +39,8 @@ async fn usb_ncm_task(class: Runner<'static, MyDriver, MTU>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<Device<'static, MTU>>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, Device<'static, MTU>>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::main]
@@ -71,14 +70,17 @@ async fn main(spawner: Spawner) {
     config.device_protocol = 0x01;
 
     // Create embassy-usb DeviceBuilder using the driver and config.
+    static CONFIG_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+    static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
+    static MSOS_DESC: StaticCell<[u8; 128]> = StaticCell::new();
+    static CONTROL_BUF: StaticCell<[u8; 128]> = StaticCell::new();
     let mut builder = Builder::new(
         driver,
         config,
-        &mut make_static!([0; 256])[..],
-        &mut make_static!([0; 256])[..],
-        &mut make_static!([0; 256])[..],
-        &mut make_static!([0; 128])[..],
-        &mut make_static!([0; 128])[..],
+        &mut CONFIG_DESC.init([0; 256])[..],
+        &mut BOS_DESC.init([0; 256])[..],
+        &mut MSOS_DESC.init([0; 128])[..],
+        &mut CONTROL_BUF.init([0; 128])[..],
     );
 
     // Our MAC addr.
@@ -87,14 +89,16 @@ async fn main(spawner: Spawner) {
     let host_mac_addr = [0x88, 0x88, 0x88, 0x88, 0x88, 0x88];
 
     // Create classes on the builder.
-    let class = CdcNcmClass::new(&mut builder, make_static!(State::new()), host_mac_addr, 64);
+    static STATE: StaticCell<State> = StaticCell::new();
+    let class = CdcNcmClass::new(&mut builder, STATE.init(State::new()), host_mac_addr, 64);
 
     // Build the builder.
     let usb = builder.build();
 
     unwrap!(spawner.spawn(usb_task(usb)));
 
-    let (runner, device) = class.into_embassy_net_device::<MTU, 4, 4>(make_static!(NetState::new()), our_mac_addr);
+    static NET_STATE: StaticCell<NetState<MTU, 4, 4>> = StaticCell::new();
+    let (runner, device) = class.into_embassy_net_device::<MTU, 4, 4>(NET_STATE.init(NetState::new()), our_mac_addr);
     unwrap!(spawner.spawn(usb_ncm_task(runner)));
 
     let config = embassy_net::Config::dhcpv4(Default::default());
@@ -111,14 +115,10 @@ async fn main(spawner: Spawner) {
     let seed = u64::from_le_bytes(seed);
 
     // Init network stack
-    let stack = &*make_static!(Stack::new(
-        device,
-        config,
-        make_static!(StackResources::<2>::new()),
-        seed
-    ));
+    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+    let (stack, runner) = embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
 
-    unwrap!(spawner.spawn(net_task(stack)));
+    unwrap!(spawner.spawn(net_task(runner)));
 
     // And now we can use it!
 

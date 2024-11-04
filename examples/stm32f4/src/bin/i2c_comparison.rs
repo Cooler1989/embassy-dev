@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 
 // Example originally designed for stm32f411ceu6 with three A1454 hall effect sensors, connected to I2C1, 2 and 3
 // on the pins referenced in the peripheral definitions.
@@ -14,7 +13,7 @@ use embassy_stm32::i2c::I2c;
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{bind_interrupts, i2c, peripherals};
 use embassy_time::Instant;
-use futures::future::try_join3;
+use futures_util::future::try_join3;
 use {defmt_rtt as _, panic_probe as _};
 
 const ADDRESS: u8 = 96;

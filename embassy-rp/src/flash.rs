@@ -1,3 +1,4 @@
+//! Flash driver.
 use core::future::Future;
 use core::marker::PhantomData;
 use core::pin::Pin;
@@ -13,21 +14,31 @@ use crate::dma::{AnyChannel, Channel, Transfer};
 use crate::pac;
 use crate::peripherals::FLASH;
 
+/// Flash base address.
 pub const FLASH_BASE: *const u32 = 0x10000000 as _;
 
-// If running from RAM, we might have no boot2. Use bootrom `flash_enter_cmd_xip` instead.
+/// Address for xip setup function set up by the 235x bootrom.
+#[cfg(feature = "_rp235x")]
+pub const BOOTROM_BASE: *const u32 = 0x400e0000 as _;
+
+/// If running from RAM, we might have no boot2. Use bootrom `flash_enter_cmd_xip` instead.
 // TODO: when run-from-ram is set, completely skip the "pause cores and jumpp to RAM" dance.
-pub const USE_BOOT2: bool = !cfg!(feature = "run-from-ram");
+pub const USE_BOOT2: bool = !cfg!(feature = "run-from-ram") | cfg!(feature = "_rp235x");
 
 // **NOTE**:
 //
 // These limitations are currently enforced because of using the
 // RP2040 boot-rom flash functions, that are optimized for flash compatibility
 // rather than performance.
+/// Flash page size.
 pub const PAGE_SIZE: usize = 256;
+/// Flash write size.
 pub const WRITE_SIZE: usize = 1;
+/// Flash read size.
 pub const READ_SIZE: usize = 1;
+/// Flash erase size.
 pub const ERASE_SIZE: usize = 4096;
+/// Flash DMA read size.
 pub const ASYNC_READ_SIZE: usize = 4;
 
 /// Error type for NVMC operations.
@@ -38,7 +49,9 @@ pub enum Error {
     OutOfBounds,
     /// Unaligned operation or using unaligned buffers.
     Unaligned,
+    /// Accessed from the wrong core.
     InvalidCore,
+    /// Other error
     Other,
 }
 
@@ -88,7 +101,10 @@ impl<'a, 'd, T: Instance, const FLASH_SIZE: usize> Drop for BackgroundRead<'a, '
         // Errata RP2040-E8: Perform an uncached read to make sure there's not a transfer in
         // flight that might effect an address written to start a new transfer.  This stalls
         // until after any transfer is complete, so the address will not change anymore.
+        #[cfg(feature = "rp2040")]
         const XIP_NOCACHE_NOALLOC_BASE: *const u32 = 0x13000000 as *const _;
+        #[cfg(feature = "_rp235x")]
+        const XIP_NOCACHE_NOALLOC_BASE: *const u32 = 0x14000000 as *const _;
         unsafe {
             core::ptr::read_volatile(XIP_NOCACHE_NOALLOC_BASE);
         }
@@ -96,12 +112,18 @@ impl<'a, 'd, T: Instance, const FLASH_SIZE: usize> Drop for BackgroundRead<'a, '
     }
 }
 
+/// Flash driver.
 pub struct Flash<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> {
     dma: Option<PeripheralRef<'d, AnyChannel>>,
     phantom: PhantomData<(&'d mut T, M)>,
 }
 
 impl<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> Flash<'d, T, M, FLASH_SIZE> {
+    /// Blocking read.
+    ///
+    /// The offset and buffer must be aligned.
+    ///
+    /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
     pub fn blocking_read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Error> {
         trace!(
             "Reading from 0x{:x} to 0x{:x}",
@@ -116,10 +138,14 @@ impl<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> Flash<'d, T, M, FLASH_SI
         Ok(())
     }
 
+    /// Flash capacity.
     pub fn capacity(&self) -> usize {
         FLASH_SIZE
     }
 
+    /// Blocking erase.
+    ///
+    /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
     pub fn blocking_erase(&mut self, from: u32, to: u32) -> Result<(), Error> {
         check_erase(self, from, to)?;
 
@@ -136,6 +162,11 @@ impl<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> Flash<'d, T, M, FLASH_SI
         Ok(())
     }
 
+    /// Blocking write.
+    ///
+    /// The offset and buffer must be aligned.
+    ///
+    /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
     pub fn blocking_write(&mut self, offset: u32, bytes: &[u8]) -> Result<(), Error> {
         check_write(self, offset, bytes.len())?;
 
@@ -201,12 +232,14 @@ impl<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> Flash<'d, T, M, FLASH_SI
     }
 
     /// Read SPI flash unique ID
+    #[cfg(feature = "rp2040")]
     pub fn blocking_unique_id(&mut self, uid: &mut [u8]) -> Result<(), Error> {
         unsafe { in_ram(|| ram_helpers::flash_unique_id(uid))? };
         Ok(())
     }
 
     /// Read SPI flash JEDEC ID
+    #[cfg(feature = "rp2040")]
     pub fn blocking_jedec_id(&mut self) -> Result<u32, Error> {
         let mut jedec = None;
         unsafe {
@@ -219,6 +252,7 @@ impl<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> Flash<'d, T, M, FLASH_SI
 }
 
 impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, Blocking, FLASH_SIZE> {
+    /// Create a new flash driver in blocking mode.
     pub fn new_blocking(_flash: impl Peripheral<P = T> + 'd) -> Self {
         Self {
             dma: None,
@@ -228,6 +262,7 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, Blocking, FLASH_SIZE
 }
 
 impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, Async, FLASH_SIZE> {
+    /// Create a new flash driver in async mode.
     pub fn new(_flash: impl Peripheral<P = T> + 'd, dma: impl Peripheral<P = impl Channel> + 'd) -> Self {
         into_ref!(dma);
         Self {
@@ -236,6 +271,11 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, Async, FLASH_SIZE> {
         }
     }
 
+    /// Start a background read operation.
+    ///
+    /// The offset and buffer must be aligned.
+    ///
+    /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
     pub fn background_read<'a>(
         &'a mut self,
         offset: u32,
@@ -270,8 +310,18 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, Async, FLASH_SIZE> {
         // Use the XIP AUX bus port, rather than the FIFO register access (e.x.
         // pac::XIP_CTRL.stream_fifo().as_ptr()) to avoid DMA stalling on
         // general XIP access.
+        #[cfg(feature = "rp2040")]
         const XIP_AUX_BASE: *const u32 = 0x50400000 as *const _;
-        let transfer = unsafe { crate::dma::read(self.dma.as_mut().unwrap(), XIP_AUX_BASE, data, 37) };
+        #[cfg(feature = "_rp235x")]
+        const XIP_AUX_BASE: *const u32 = 0x50500000 as *const _;
+        let transfer = unsafe {
+            crate::dma::read(
+                self.dma.as_mut().unwrap(),
+                XIP_AUX_BASE,
+                data,
+                pac::dma::vals::TreqSel::XIP_STREAM,
+            )
+        };
 
         Ok(BackgroundRead {
             flash: PhantomData,
@@ -279,6 +329,11 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, Async, FLASH_SIZE> {
         })
     }
 
+    /// Async read.
+    ///
+    /// The offset and buffer must be aligned.
+    ///
+    /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
     pub async fn read(&mut self, offset: u32, bytes: &mut [u8]) -> Result<(), Error> {
         use core::mem::MaybeUninit;
 
@@ -290,9 +345,9 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, Async, FLASH_SIZE> {
         // If the destination address is already aligned, then we can just DMA directly
         if (bytes.as_ptr() as u32) % 4 == 0 {
             // Safety: alignment and size have been checked for compatibility
-            let mut buf: &mut [u32] =
+            let buf: &mut [u32] =
                 unsafe { core::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut u32, bytes.len() / 4) };
-            self.background_read(offset, &mut buf)?.await;
+            self.background_read(offset, buf)?.await;
             return Ok(());
         }
 
@@ -337,6 +392,11 @@ impl<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> ReadNorFlash for Flash<'
 }
 
 impl<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> MultiwriteNorFlash for Flash<'d, T, M, FLASH_SIZE> {}
+
+impl<'d, T: Instance, const FLASH_SIZE: usize> embedded_storage_async::nor_flash::MultiwriteNorFlash
+    for Flash<'d, T, Async, FLASH_SIZE>
+{
+}
 
 impl<'d, T: Instance, M: Mode, const FLASH_SIZE: usize> NorFlash for Flash<'d, T, M, FLASH_SIZE> {
     const WRITE_SIZE: usize = WRITE_SIZE;
@@ -384,8 +444,6 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> embedded_storage_async::nor_flash
 
 #[allow(dead_code)]
 mod ram_helpers {
-    use core::marker::PhantomData;
-
     use super::*;
     use crate::rom_data;
 
@@ -466,7 +524,10 @@ mod ram_helpers {
     pub unsafe fn flash_range_erase(addr: u32, len: u32) {
         let mut boot2 = [0u32; 256 / 4];
         let ptrs = if USE_BOOT2 {
+            #[cfg(feature = "rp2040")]
             rom_data::memcpy44(&mut boot2 as *mut _, FLASH_BASE, 256);
+            #[cfg(feature = "_rp235x")]
+            core::ptr::copy_nonoverlapping(BOOTROM_BASE as *const u8, boot2.as_mut_ptr() as *mut u8, 256);
             flash_function_pointers_with_boot2(true, false, &boot2)
         } else {
             flash_function_pointers(true, false)
@@ -496,7 +557,10 @@ mod ram_helpers {
     pub unsafe fn flash_range_erase_and_program(addr: u32, data: &[u8]) {
         let mut boot2 = [0u32; 256 / 4];
         let ptrs = if USE_BOOT2 {
+            #[cfg(feature = "rp2040")]
             rom_data::memcpy44(&mut boot2 as *mut _, FLASH_BASE, 256);
+            #[cfg(feature = "_rp235x")]
+            core::ptr::copy_nonoverlapping(BOOTROM_BASE as *const u8, (boot2).as_mut_ptr() as *mut u8, 256);
             flash_function_pointers_with_boot2(true, true, &boot2)
         } else {
             flash_function_pointers(true, true)
@@ -531,7 +595,10 @@ mod ram_helpers {
     pub unsafe fn flash_range_program(addr: u32, data: &[u8]) {
         let mut boot2 = [0u32; 256 / 4];
         let ptrs = if USE_BOOT2 {
+            #[cfg(feature = "rp2040")]
             rom_data::memcpy44(&mut boot2 as *mut _, FLASH_BASE, 256);
+            #[cfg(feature = "_rp235x")]
+            core::ptr::copy_nonoverlapping(BOOTROM_BASE as *const u8, boot2.as_mut_ptr() as *mut u8, 256);
             flash_function_pointers_with_boot2(false, true, &boot2)
         } else {
             flash_function_pointers(false, true)
@@ -558,16 +625,8 @@ mod ram_helpers {
     /// addr must be aligned to 4096
     #[inline(never)]
     #[link_section = ".data.ram_func"]
+    #[cfg(feature = "rp2040")]
     unsafe fn write_flash_inner(addr: u32, len: u32, data: Option<&[u8]>, ptrs: *const FlashFunctionPointers) {
-        /*
-         Should be equivalent to:
-            rom_data::connect_internal_flash();
-            rom_data::flash_exit_xip();
-            rom_data::flash_range_erase(addr, len, 1 << 31, 0); // if selected
-            rom_data::flash_range_program(addr, data as *const _, len); // if selected
-            rom_data::flash_flush_cache();
-            rom_data::flash_enter_cmd_xip();
-        */
         #[cfg(target_arch = "arm")]
         core::arch::asm!(
             "mov r8, r0",
@@ -586,18 +645,18 @@ mod ram_helpers {
             "movs r3, #0", // r3 = 0
             "ldr r4, [{ptrs}, #8]",
             "cmp r4, #0",
-            "beq 1f",
+            "beq 2f",
             "blx r4", // flash_range_erase(addr, len, 1 << 31, 0)
-            "1:",
+            "2:",
 
             "mov r0, r8", // r0 = addr
             "mov r1, r9", // r0 = data
             "mov r2, r10", // r2 = len
             "ldr r4, [{ptrs}, #12]",
             "cmp r4, #0",
-            "beq 1f",
+            "beq 2f",
             "blx r4", // flash_range_program(addr, data, len);
-            "1:",
+            "2:",
 
             "ldr r4, [{ptrs}, #16]",
             "blx r4", // flash_flush_cache();
@@ -618,6 +677,32 @@ mod ram_helpers {
             lateout("r10") _,
             clobber_abi("C"),
         );
+    }
+
+    /// # Safety
+    ///
+    /// Nothing must access flash while this is running.
+    /// Usually this means:
+    ///   - interrupts must be disabled
+    ///   - 2nd core must be running code from RAM or ROM with interrupts disabled
+    ///   - DMA must not access flash memory
+    /// Length of data must be a multiple of 4096
+    /// addr must be aligned to 4096
+    #[inline(never)]
+    #[link_section = ".data.ram_func"]
+    #[cfg(feature = "_rp235x")]
+    unsafe fn write_flash_inner(addr: u32, len: u32, data: Option<&[u8]>, ptrs: *const FlashFunctionPointers) {
+        let data = data.map(|d| d.as_ptr()).unwrap_or(core::ptr::null());
+        ((*ptrs).connect_internal_flash)();
+        ((*ptrs).flash_exit_xip)();
+        if (*ptrs).flash_range_erase.is_some() {
+            ((*ptrs).flash_range_erase.unwrap())(addr, len as usize, 1 << 31, 0);
+        }
+        if (*ptrs).flash_range_program.is_some() {
+            ((*ptrs).flash_range_program.unwrap())(addr, data as *const _, len as usize);
+        }
+        ((*ptrs).flash_flush_cache)();
+        ((*ptrs).flash_enter_cmd_xip)();
     }
 
     #[repr(C)]
@@ -653,6 +738,7 @@ mod ram_helpers {
     ///   - DMA must not access flash memory
     ///
     /// Credit: taken from `rp2040-flash` (also licensed Apache+MIT)
+    #[cfg(feature = "rp2040")]
     pub unsafe fn flash_unique_id(out: &mut [u8]) {
         let mut boot2 = [0u32; 256 / 4];
         let ptrs = if USE_BOOT2 {
@@ -661,6 +747,7 @@ mod ram_helpers {
         } else {
             flash_function_pointers(false, false)
         };
+
         // 4B - read unique ID
         let cmd = [0x4B];
         read_flash(&cmd[..], 4, out, &ptrs as *const FlashFunctionPointers);
@@ -681,6 +768,7 @@ mod ram_helpers {
     ///   - DMA must not access flash memory
     ///
     /// Credit: taken from `rp2040-flash` (also licensed Apache+MIT)
+    #[cfg(feature = "rp2040")]
     pub unsafe fn flash_jedec_id() -> u32 {
         let mut boot2 = [0u32; 256 / 4];
         let ptrs = if USE_BOOT2 {
@@ -689,6 +777,7 @@ mod ram_helpers {
         } else {
             flash_function_pointers(false, false)
         };
+
         let mut id = [0u8; 4];
         // 9F - read JEDEC ID
         let cmd = [0x9F];
@@ -696,6 +785,7 @@ mod ram_helpers {
         u32::from_be_bytes(id)
     }
 
+    #[cfg(feature = "rp2040")]
     unsafe fn read_flash(cmd_addr: &[u8], dummy_len: u32, out: &mut [u8], ptrs: *const FlashFunctionPointers) {
         read_flash_inner(
             FlashCommand {
@@ -719,6 +809,7 @@ mod ram_helpers {
     /// Credit: taken from `rp2040-flash` (also licensed Apache+MIT)
     #[inline(never)]
     #[link_section = ".data.ram_func"]
+    #[cfg(feature = "rp2040")]
     unsafe fn read_flash_inner(cmd: FlashCommand, ptrs: *const FlashFunctionPointers) {
         #[cfg(target_arch = "arm")]
         core::arch::asm!(
@@ -763,12 +854,12 @@ mod ram_helpers {
             "adds r2, 0x60", // &DR
             "ldr r0, [r3, #0]", // cmd_addr
             "ldr r1, [r3, #4]", // cmd_addr_len
-            "10:",
+            "3:",
             "ldrb r3, [r0]",
             "strb r3, [r2]", // DR
             "adds r0, #1",
             "subs r1, #1",
-            "bne 10b",
+            "bne 3b",
 
             // Skip any dummy cycles
             "mov r3, r10", // cmd
@@ -869,25 +960,29 @@ pub(crate) unsafe fn in_ram(operation: impl FnOnce()) -> Result<(), Error> {
     Ok(())
 }
 
-mod sealed {
-    pub trait Instance {}
-    pub trait Mode {}
-}
+trait SealedInstance {}
+trait SealedMode {}
 
-pub trait Instance: sealed::Instance {}
-pub trait Mode: sealed::Mode {}
+/// Flash instance.
+#[allow(private_bounds)]
+pub trait Instance: SealedInstance {}
+/// Flash mode.
+#[allow(private_bounds)]
+pub trait Mode: SealedMode {}
 
-impl sealed::Instance for FLASH {}
+impl SealedInstance for FLASH {}
 impl Instance for FLASH {}
 
 macro_rules! impl_mode {
     ($name:ident) => {
-        impl sealed::Mode for $name {}
+        impl SealedMode for $name {}
         impl Mode for $name {}
     };
 }
 
+/// Flash blocking mode.
 pub struct Blocking;
+/// Flash async mode.
 pub struct Async;
 
 impl_mode!(Blocking);

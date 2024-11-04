@@ -1,3 +1,4 @@
+//! Ethernet (ETH)
 #![macro_use]
 
 #[cfg_attr(any(eth_v1a, eth_v1b, eth_v1c), path = "v1/mod.rs")]
@@ -12,6 +13,7 @@ use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
 use embassy_sync::waitqueue::AtomicWaker;
 
 pub use self::_version::{InterruptHandler, *};
+use crate::rcc::RccPeripheral;
 
 #[allow(unused)]
 const MTU: usize = 1514;
@@ -22,6 +24,14 @@ const RX_BUFFER_SIZE: usize = 1536;
 #[derive(Copy, Clone)]
 pub(crate) struct Packet<const N: usize>([u8; N]);
 
+/// Ethernet packet queue.
+///
+/// This struct owns the memory used for reading and writing packets.
+///
+/// `TX` is the number of packets in the transmit queue, `RX` in the receive
+/// queue. A bigger queue allows the hardware to receive more packets while the
+/// CPU is busy doing other things, which may increase performance (especially for RX)
+/// at the cost of more RAM usage.
 pub struct PacketQueue<const TX: usize, const RX: usize> {
     tx_desc: [TDes; TX],
     rx_desc: [RDes; RX],
@@ -30,6 +40,7 @@ pub struct PacketQueue<const TX: usize, const RX: usize> {
 }
 
 impl<const TX: usize, const RX: usize> PacketQueue<TX, RX> {
+    /// Create a new packet queue.
     pub const fn new() -> Self {
         const NEW_TDES: TDes = TDes::new();
         const NEW_RDES: RDes = RDes::new();
@@ -41,7 +52,18 @@ impl<const TX: usize, const RX: usize> PacketQueue<TX, RX> {
         }
     }
 
-    // Allow to initialize a Self without requiring it to go on the stack
+    /// Initialize a packet queue in-place.
+    ///
+    /// This can be helpful to avoid accidentally stack-allocating the packet queue in the stack. The
+    /// Rust compiler can sometimes be a bit dumb when working with large owned values: if you call `new()`
+    /// and then store the returned PacketQueue in its final place (like a `static`), the compiler might
+    /// place it temporarily on the stack then move it. Since this struct is quite big, it may result
+    /// in a stack overflow.
+    ///
+    /// With this function, you can create an uninitialized `static` with type `MaybeUninit<PacketQueue<...>>`
+    /// and initialize it in-place, guaranteeing no stack usage.
+    ///
+    /// After calling this function, calling `assume_init` on the MaybeUninit is guaranteed safe.
     pub fn init(this: &mut MaybeUninit<Self>) {
         unsafe {
             this.as_mut_ptr().write_bytes(0u8, 1);
@@ -52,8 +74,14 @@ impl<const TX: usize, const RX: usize> PacketQueue<TX, RX> {
 static WAKER: AtomicWaker = AtomicWaker::new();
 
 impl<'d, T: Instance, P: PHY> embassy_net_driver::Driver for Ethernet<'d, T, P> {
-    type RxToken<'a> = RxToken<'a, 'd> where Self: 'a;
-    type TxToken<'a> = TxToken<'a, 'd> where Self: 'a;
+    type RxToken<'a>
+        = RxToken<'a, 'd>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TxToken<'a, 'd>
+    where
+        Self: 'a;
 
     fn receive(&mut self, cx: &mut Context) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         WAKER.register(cx.waker());
@@ -93,6 +121,7 @@ impl<'d, T: Instance, P: PHY> embassy_net_driver::Driver for Ethernet<'d, T, P> 
     }
 }
 
+/// `embassy-net` RX token.
 pub struct RxToken<'a, 'd> {
     rx: &'a mut RDesRing<'d>,
 }
@@ -110,6 +139,7 @@ impl<'a, 'd> embassy_net_driver::RxToken for RxToken<'a, 'd> {
     }
 }
 
+/// `embassy-net` TX token.
 pub struct TxToken<'a, 'd> {
     tx: &'a mut TDesRing<'d>,
 }
@@ -153,27 +183,48 @@ pub unsafe trait PHY {
     fn poll_link<S: StationManagement>(&mut self, sm: &mut S, cx: &mut Context) -> bool;
 }
 
-pub(crate) mod sealed {
-    pub trait Instance {
-        fn regs() -> crate::pac::eth::Eth;
+impl<'d, T: Instance, P: PHY> Ethernet<'d, T, P> {
+    /// Directly expose the SMI interface used by the Ethernet driver.
+    ///
+    /// This can be used to for example configure special PHY registers for compliance testing.
+    ///
+    /// # Safety
+    ///
+    /// Revert any temporary PHY register changes such as to enable test modes before handing
+    /// the Ethernet device over to the networking stack otherwise things likely won't work.
+    pub unsafe fn station_management(&mut self) -> &mut impl StationManagement {
+        &mut self.station_management
     }
 }
 
-pub trait Instance: sealed::Instance + Send + 'static {}
+trait SealedInstance {
+    fn regs() -> crate::pac::eth::Eth;
+}
 
-impl sealed::Instance for crate::peripherals::ETH {
+/// Ethernet instance.
+#[allow(private_bounds)]
+pub trait Instance: SealedInstance + RccPeripheral + Send + 'static {}
+
+impl SealedInstance for crate::peripherals::ETH {
     fn regs() -> crate::pac::eth::Eth {
         crate::pac::ETH
     }
 }
 impl Instance for crate::peripherals::ETH {}
 
+pin_trait!(RXClkPin, Instance);
+pin_trait!(TXClkPin, Instance);
 pin_trait!(RefClkPin, Instance);
 pin_trait!(MDIOPin, Instance);
 pin_trait!(MDCPin, Instance);
+pin_trait!(RXDVPin, Instance);
 pin_trait!(CRSPin, Instance);
 pin_trait!(RXD0Pin, Instance);
 pin_trait!(RXD1Pin, Instance);
+pin_trait!(RXD2Pin, Instance);
+pin_trait!(RXD3Pin, Instance);
 pin_trait!(TXD0Pin, Instance);
 pin_trait!(TXD1Pin, Instance);
+pin_trait!(TXD2Pin, Instance);
+pin_trait!(TXD3Pin, Instance);
 pin_trait!(TXEnPin, Instance);

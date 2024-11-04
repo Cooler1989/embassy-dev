@@ -1,20 +1,19 @@
 // required-features: eth
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 
 #[path = "../common.rs"]
 mod common;
 use common::*;
 use embassy_executor::Spawner;
-use embassy_net::{Stack, StackResources};
+use embassy_net::StackResources;
 use embassy_stm32::eth::generic_smi::GenericSMI;
 use embassy_stm32::eth::{Ethernet, PacketQueue};
 use embassy_stm32::peripherals::ETH;
 use embassy_stm32::rng::Rng;
 use embassy_stm32::{bind_interrupts, eth, peripherals, rng};
 use rand_core::RngCore;
-use static_cell::make_static;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 teleprobe_meta::timeout!(120);
@@ -33,13 +32,13 @@ bind_interrupts!(struct Irqs {
 type Device = Ethernet<'static, ETH, GenericSMI>;
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<Device>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, Device>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_stm32::init(config());
+    let p = init();
     info!("Hello World!");
 
     // Generate random seed.
@@ -71,8 +70,9 @@ async fn main(spawner: Spawner) {
     #[cfg(not(feature = "stm32f207zg"))]
     const PACKET_QUEUE_SIZE: usize = 4;
 
+    static PACKETS: StaticCell<PacketQueue<PACKET_QUEUE_SIZE, PACKET_QUEUE_SIZE>> = StaticCell::new();
     let device = Ethernet::new(
-        make_static!(PacketQueue::<PACKET_QUEUE_SIZE, PACKET_QUEUE_SIZE>::new()),
+        PACKETS.init(PacketQueue::<PACKET_QUEUE_SIZE, PACKET_QUEUE_SIZE>::new()),
         p.ETH,
         Irqs,
         p.PA1,
@@ -99,15 +99,11 @@ async fn main(spawner: Spawner) {
     //});
 
     // Init network stack
-    let stack = &*make_static!(Stack::new(
-        device,
-        config,
-        make_static!(StackResources::<2>::new()),
-        seed
-    ));
+    static RESOURCES: StaticCell<StackResources<2>> = StaticCell::new();
+    let (stack, runner) = embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
 
     // Launch network task
-    unwrap!(spawner.spawn(net_task(&stack)));
+    unwrap!(spawner.spawn(net_task(runner)));
 
     perf_client::run(
         stack,

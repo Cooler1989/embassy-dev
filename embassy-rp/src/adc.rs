@@ -1,3 +1,4 @@
+//! ADC driver.
 use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::mem;
@@ -7,35 +8,35 @@ use core::task::Poll;
 use embassy_hal_internal::{into_ref, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 
-use crate::gpio::sealed::Pin as GpioPin;
-use crate::gpio::{self, AnyPin, Pull};
+use crate::gpio::{self, AnyPin, Pull, SealedPin as GpioPin};
 use crate::interrupt::typelevel::Binding;
 use crate::interrupt::InterruptExt;
+use crate::pac::dma::vals::TreqSel;
 use crate::peripherals::{ADC, ADC_TEMP_SENSOR};
 use crate::{dma, interrupt, pac, peripherals, Peripheral, RegExt};
 
 static WAKER: AtomicWaker = AtomicWaker::new();
 
+/// ADC config.
 #[non_exhaustive]
+#[derive(Default)]
 pub struct Config {}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {}
-    }
-}
 
 enum Source<'p> {
     Pin(PeripheralRef<'p, AnyPin>),
     TempSensor(PeripheralRef<'p, ADC_TEMP_SENSOR>),
 }
 
+/// ADC channel.
 pub struct Channel<'p>(Source<'p>);
 
 impl<'p> Channel<'p> {
+    /// Create a new ADC channel from pin with the provided [Pull] configuration.
     pub fn new_pin(pin: impl Peripheral<P = impl AdcPin + 'p> + 'p, pull: Pull) -> Self {
         into_ref!(pin);
         pin.pad_ctrl().modify(|w| {
+            #[cfg(feature = "_rp235x")]
+            w.set_iso(false);
             // manual says:
             //
             // > When using an ADC input shared with a GPIO pin, the pin’s
@@ -49,6 +50,7 @@ impl<'p> Channel<'p> {
         Self(Source::Pin(pin.map_into()))
     }
 
+    /// Create a new ADC channel for the internal temperature sensor.
     pub fn new_temp_sensor(s: impl Peripheral<P = ADC_TEMP_SENSOR> + 'p) -> Self {
         let r = pac::ADC;
         r.cs().write_set(|w| w.set_ts_en(true));
@@ -83,35 +85,44 @@ impl<'p> Drop for Source<'p> {
     }
 }
 
+/// ADC sample.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(transparent)]
 pub struct Sample(u16);
 
 impl Sample {
+    /// Sample is valid.
     pub fn good(&self) -> bool {
         self.0 < 0x8000
     }
 
+    /// Sample value.
     pub fn value(&self) -> u16 {
         self.0 & !0x8000
     }
 }
 
+/// ADC error.
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
+    /// Error converting value.
     ConversionFailed,
 }
 
+/// ADC mode.
 pub trait Mode {}
 
+/// ADC async mode.
 pub struct Async;
 impl Mode for Async {}
 
+/// ADC blocking mode.
 pub struct Blocking;
 impl Mode for Blocking {}
 
+/// ADC driver.
 pub struct Adc<'d, M: Mode> {
     phantom: PhantomData<(&'d ADC, M)>,
 }
@@ -150,6 +161,7 @@ impl<'d, M: Mode> Adc<'d, M> {
         while !r.cs().read().ready() {}
     }
 
+    /// Sample a value from a channel in blocking mode.
     pub fn blocking_read(&mut self, ch: &mut Channel) -> Result<u16, Error> {
         let r = Self::regs();
         r.cs().modify(|w| {
@@ -160,12 +172,13 @@ impl<'d, M: Mode> Adc<'d, M> {
         while !r.cs().read().ready() {}
         match r.cs().read().err() {
             true => Err(Error::ConversionFailed),
-            false => Ok(r.result().read().result().into()),
+            false => Ok(r.result().read().result()),
         }
     }
 }
 
 impl<'d> Adc<'d, Async> {
+    /// Create ADC driver in async mode.
     pub fn new(
         _inner: impl Peripheral<P = ADC> + 'd,
         _irq: impl Binding<interrupt::typelevel::ADC_IRQ_FIFO, InterruptHandler>,
@@ -194,6 +207,7 @@ impl<'d> Adc<'d, Async> {
         .await;
     }
 
+    /// Sample a value from a channel until completed.
     pub async fn read(&mut self, ch: &mut Channel<'_>) -> Result<u16, Error> {
         let r = Self::regs();
         r.cs().modify(|w| {
@@ -204,22 +218,37 @@ impl<'d> Adc<'d, Async> {
         Self::wait_for_ready().await;
         match r.cs().read().err() {
             true => Err(Error::ConversionFailed),
-            false => Ok(r.result().read().result().into()),
+            false => Ok(r.result().read().result()),
         }
     }
 
+    // Note for refactoring: we don't require the actual Channels here, just the channel numbers.
+    // The public api is responsible for asserting ownership of the actual Channels.
     async fn read_many_inner<W: dma::Word>(
         &mut self,
-        ch: &mut Channel<'_>,
+        channels: impl Iterator<Item = u8>,
         buf: &mut [W],
         fcs_err: bool,
         div: u16,
         dma: impl Peripheral<P = impl dma::Channel>,
     ) -> Result<(), Error> {
+        #[cfg(feature = "rp2040")]
+        let mut rrobin = 0_u8;
+        #[cfg(feature = "_rp235x")]
+        let mut rrobin = 0_u16;
+        for c in channels {
+            rrobin |= 1 << c;
+        }
+        let first_ch = rrobin.trailing_zeros() as u8;
+        if rrobin.count_ones() == 1 {
+            rrobin = 0;
+        }
+
         let r = Self::regs();
         // clear previous errors and set channel
         r.cs().modify(|w| {
-            w.set_ainsel(ch.channel());
+            w.set_ainsel(first_ch);
+            w.set_rrobin(rrobin);
             w.set_err_sticky(true); // clear previous errors
             w.set_start_many(false);
         });
@@ -255,7 +284,7 @@ impl<'d> Adc<'d, Async> {
         }
         let auto_reset = ResetDmaConfig;
 
-        let dma = unsafe { dma::read(dma, r.fifo().as_ptr() as *const W, buf as *mut [W], 36) };
+        let dma = unsafe { dma::read(dma, r.fifo().as_ptr() as *const W, buf as *mut [W], TreqSel::ADC) };
         // start conversions and wait for dma to finish. we can't report errors early
         // because there's no interrupt to signal them, and inspecting every element
         // of the fifo is too costly to do here.
@@ -272,6 +301,49 @@ impl<'d> Adc<'d, Async> {
         }
     }
 
+    /// Sample multiple values from multiple channels using DMA.
+    /// Samples are stored in an interleaved fashion inside the buffer.
+    /// `div` is the integer part of the clock divider and can be calculated with `floor(48MHz / sample_rate * num_channels - 1)`
+    /// Any `div` value of less than 96 will have the same effect as setting it to 0
+    #[inline]
+    pub async fn read_many_multichannel<S: AdcSample>(
+        &mut self,
+        ch: &mut [Channel<'_>],
+        buf: &mut [S],
+        div: u16,
+        dma: impl Peripheral<P = impl dma::Channel>,
+    ) -> Result<(), Error> {
+        self.read_many_inner(ch.iter().map(|c| c.channel()), buf, false, div, dma)
+            .await
+    }
+
+    /// Sample multiple values from multiple channels using DMA, with errors inlined in samples.
+    /// Samples are stored in an interleaved fashion inside the buffer.
+    /// `div` is the integer part of the clock divider and can be calculated with `floor(48MHz / sample_rate * num_channels - 1)`
+    /// Any `div` value of less than 96 will have the same effect as setting it to 0
+    #[inline]
+    pub async fn read_many_multichannel_raw(
+        &mut self,
+        ch: &mut [Channel<'_>],
+        buf: &mut [Sample],
+        div: u16,
+        dma: impl Peripheral<P = impl dma::Channel>,
+    ) {
+        // errors are reported in individual samples
+        let _ = self
+            .read_many_inner(
+                ch.iter().map(|c| c.channel()),
+                unsafe { mem::transmute::<_, &mut [u16]>(buf) },
+                true,
+                div,
+                dma,
+            )
+            .await;
+    }
+
+    /// Sample multiple values from a channel using DMA.
+    /// `div` is the integer part of the clock divider and can be calculated with `floor(48MHz / sample_rate - 1)`
+    /// Any `div` value of less than 96 will have the same effect as setting it to 0
     #[inline]
     pub async fn read_many<S: AdcSample>(
         &mut self,
@@ -280,9 +352,13 @@ impl<'d> Adc<'d, Async> {
         div: u16,
         dma: impl Peripheral<P = impl dma::Channel>,
     ) -> Result<(), Error> {
-        self.read_many_inner(ch, buf, false, div, dma).await
+        self.read_many_inner([ch.channel()].into_iter(), buf, false, div, dma)
+            .await
     }
 
+    /// Sample multiple values from a channel using DMA, with errors inlined in samples.
+    /// `div` is the integer part of the clock divider and can be calculated with `floor(48MHz / sample_rate - 1)`
+    /// Any `div` value of less than 96 will have the same effect as setting it to 0
     #[inline]
     pub async fn read_many_raw(
         &mut self,
@@ -293,12 +369,19 @@ impl<'d> Adc<'d, Async> {
     ) {
         // errors are reported in individual samples
         let _ = self
-            .read_many_inner(ch, unsafe { mem::transmute::<_, &mut [u16]>(buf) }, true, div, dma)
+            .read_many_inner(
+                [ch.channel()].into_iter(),
+                unsafe { mem::transmute::<_, &mut [u16]>(buf) },
+                true,
+                div,
+                dma,
+            )
             .await;
     }
 }
 
 impl<'d> Adc<'d, Blocking> {
+    /// Create ADC driver in blocking mode.
     pub fn new_blocking(_inner: impl Peripheral<P = ADC> + 'd, _config: Config) -> Self {
         Self::setup();
 
@@ -306,6 +389,7 @@ impl<'d> Adc<'d, Blocking> {
     }
 }
 
+/// Interrupt handler.
 pub struct InterruptHandler {
     _empty: (),
 }
@@ -318,35 +402,58 @@ impl interrupt::typelevel::Handler<interrupt::typelevel::ADC_IRQ_FIFO> for Inter
     }
 }
 
-mod sealed {
-    pub trait AdcSample: crate::dma::Word {}
+trait SealedAdcSample: crate::dma::Word {}
+trait SealedAdcChannel {}
 
-    pub trait AdcChannel {}
-}
+/// ADC sample.
+#[allow(private_bounds)]
+pub trait AdcSample: SealedAdcSample {}
 
-pub trait AdcSample: sealed::AdcSample {}
-
-impl sealed::AdcSample for u16 {}
+impl SealedAdcSample for u16 {}
 impl AdcSample for u16 {}
 
-impl sealed::AdcSample for u8 {}
+impl SealedAdcSample for u8 {}
 impl AdcSample for u8 {}
 
-pub trait AdcChannel: sealed::AdcChannel {}
+/// ADC channel.
+#[allow(private_bounds)]
+pub trait AdcChannel: SealedAdcChannel {}
+/// ADC pin.
 pub trait AdcPin: AdcChannel + gpio::Pin {}
 
 macro_rules! impl_pin {
     ($pin:ident, $channel:expr) => {
-        impl sealed::AdcChannel for peripherals::$pin {}
+        impl SealedAdcChannel for peripherals::$pin {}
         impl AdcChannel for peripherals::$pin {}
         impl AdcPin for peripherals::$pin {}
     };
 }
 
+#[cfg(any(feature = "rp235xa", feature = "rp2040"))]
 impl_pin!(PIN_26, 0);
+#[cfg(any(feature = "rp235xa", feature = "rp2040"))]
 impl_pin!(PIN_27, 1);
+#[cfg(any(feature = "rp235xa", feature = "rp2040"))]
 impl_pin!(PIN_28, 2);
+#[cfg(any(feature = "rp235xa", feature = "rp2040"))]
 impl_pin!(PIN_29, 3);
 
-impl sealed::AdcChannel for peripherals::ADC_TEMP_SENSOR {}
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_40, 0);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_41, 1);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_42, 2);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_43, 3);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_44, 4);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_45, 5);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_46, 6);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_47, 7);
+
+impl SealedAdcChannel for peripherals::ADC_TEMP_SENSOR {}
 impl AdcChannel for peripherals::ADC_TEMP_SENSOR {}

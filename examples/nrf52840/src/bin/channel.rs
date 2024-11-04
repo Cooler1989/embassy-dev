@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 
 use defmt::unwrap;
 use embassy_executor::Spawner;
@@ -36,8 +35,8 @@ async fn main(spawner: Spawner) {
 
     loop {
         match CHANNEL.receive().await {
-            LedState::On => led.set_high(),
-            LedState::Off => led.set_low(),
+            LedState::On => led.set_low(),
+            LedState::Off => led.set_high(),
         }
     }
 }

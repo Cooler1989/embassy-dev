@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 
 use defmt::unwrap;
 use embassy_executor::Spawner;
@@ -34,8 +33,8 @@ async fn recv_task(led: AnyPin, receiver: Receiver<'static, NoopRawMutex, LedSta
 
     loop {
         match receiver.receive().await {
-            LedState::On => led.set_high(),
-            LedState::Off => led.set_low(),
+            LedState::On => led.set_low(),
+            LedState::Off => led.set_high(),
         }
     }
 }

@@ -1,4 +1,6 @@
 #![no_std]
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 use embassy_futures::select::{select4, Either4};
 use embassy_net_driver_channel as ch;
@@ -97,12 +99,14 @@ enum InterfaceType {
 const MAX_SPI_BUFFER_SIZE: usize = 1600;
 const HEARTBEAT_MAX_GAP: Duration = Duration::from_secs(20);
 
+/// State for the esp-hosted driver.
 pub struct State {
     shared: Shared,
     ch: ch::State<MTU, 4, 4>,
 }
 
 impl State {
+    /// Create a new state.
     pub fn new() -> Self {
         Self {
             shared: Shared::new(),
@@ -111,8 +115,13 @@ impl State {
     }
 }
 
+/// Type alias for network driver.
 pub type NetDriver<'a> = ch::Device<'a, MTU>;
 
+/// Create a new esp-hosted driver using the provided state, SPI peripheral and pins.
+///
+/// Returns a device handle for interfacing with embassy-net, a control handle for
+/// interacting with the driver, and a runner for communicating with the WiFi device.
 pub async fn new<'a, SPI, IN, OUT>(
     state: &'a mut State,
     spi: SPI,
@@ -128,7 +137,7 @@ where
     let (ch_runner, device) = ch::new(&mut state.ch, ch::driver::HardwareAddress::Ethernet([0; 6]));
     let state_ch = ch_runner.state_runner();
 
-    let mut runner = Runner {
+    let runner = Runner {
         ch: ch_runner,
         state_ch,
         shared: &state.shared,
@@ -139,11 +148,11 @@ where
         spi,
         heartbeat_deadline: Instant::now() + HEARTBEAT_MAX_GAP,
     };
-    runner.init().await;
 
     (device, Control::new(state_ch, &state.shared), runner)
 }
 
+/// Runner for communicating with the WiFi device.
 pub struct Runner<'a, SPI, IN, OUT> {
     ch: ch::Runner<'a, MTU>,
     state_ch: ch::StateRunner<'a>,
@@ -164,8 +173,7 @@ where
     IN: InputPin + Wait,
     OUT: OutputPin,
 {
-    async fn init(&mut self) {}
-
+    /// Run the packet processing.
     pub async fn run(mut self) -> ! {
         debug!("resetting...");
         self.reset.set_low().unwrap();

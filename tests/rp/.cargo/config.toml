@@ -10,8 +10,7 @@ runner = "teleprobe client run"
 
 rustflags = [
   # Code-size optimizations.
-  "-Z", "trap-unreachable=no",
-  "-C", "inline-threshold=5",
+  #"-Z", "trap-unreachable=no",
   "-C", "no-vectorize-loops",
 ]
 

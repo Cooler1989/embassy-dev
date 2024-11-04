@@ -7,7 +7,6 @@
 //!     ping 192.168.7.10
 //!     nc 192.168.7.10 1234
 
-#![feature(type_alias_impl_trait)]
 #![allow(async_fn_in_trait)]
 
 #[path = "../serial_port.rs"]
@@ -17,7 +16,7 @@ use async_io::Async;
 use clap::Parser;
 use embassy_executor::{Executor, Spawner};
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Config, ConfigV4, Ipv4Address, Ipv4Cidr, Stack, StackResources};
+use embassy_net::{Config, ConfigV4, Ipv4Cidr, Stack, StackResources};
 use embassy_net_ppp::Runner;
 use embedded_io_async::Write;
 use futures::io::BufReader;
@@ -25,7 +24,7 @@ use heapless::Vec;
 use log::*;
 use nix::sys::termios;
 use rand_core::{OsRng, RngCore};
-use static_cell::{make_static, StaticCell};
+use static_cell::StaticCell;
 
 use crate::serial_port::SerialPort;
 
@@ -38,16 +37,12 @@ struct Opts {
 }
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<embassy_net_ppp::Device<'static>>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, embassy_net_ppp::Device<'static>>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::task]
-async fn ppp_task(
-    stack: &'static Stack<embassy_net_ppp::Device<'static>>,
-    mut runner: Runner<'static>,
-    port: SerialPort,
-) -> ! {
+async fn ppp_task(stack: Stack<'static>, mut runner: Runner<'static>, port: SerialPort) -> ! {
     let port = Async::new(port).unwrap();
     let port = BufReader::new(port);
     let port = adapter::FromFutures::new(port);
@@ -65,10 +60,10 @@ async fn ppp_task(
             };
             let mut dns_servers = Vec::new();
             for s in ipv4.dns_servers.iter().flatten() {
-                let _ = dns_servers.push(Ipv4Address::from_bytes(&s.0));
+                let _ = dns_servers.push(*s);
             }
             let config = ConfigV4::Static(embassy_net::StaticConfigV4 {
-                address: Ipv4Cidr::new(Ipv4Address::from_bytes(&addr.0), 0),
+                address: Ipv4Cidr::new(addr, 0),
                 gateway: None,
                 dns_servers,
             });
@@ -88,7 +83,8 @@ async fn main_task(spawner: Spawner) {
     let port = SerialPort::new(opts.device.as_str(), baudrate).unwrap();
 
     // Init network device
-    let state = make_static!(embassy_net_ppp::State::<4, 4>::new());
+    static STATE: StaticCell<embassy_net_ppp::State<4, 4>> = StaticCell::new();
+    let state = STATE.init(embassy_net_ppp::State::<4, 4>::new());
     let (device, runner) = embassy_net_ppp::new(state);
 
     // Generate random seed
@@ -97,15 +93,16 @@ async fn main_task(spawner: Spawner) {
     let seed = u64::from_le_bytes(seed);
 
     // Init network stack
-    let stack = &*make_static!(Stack::new(
+    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+    let (stack, net_runner) = embassy_net::new(
         device,
         Config::default(), // don't configure IP yet
-        make_static!(StackResources::<3>::new()),
-        seed
-    ));
+        RESOURCES.init(StackResources::new()),
+        seed,
+    );
 
     // Launch network task
-    spawner.spawn(net_task(stack)).unwrap();
+    spawner.spawn(net_task(net_runner)).unwrap();
     spawner.spawn(ppp_task(stack, runner, port)).unwrap();
 
     // Then we can use it!

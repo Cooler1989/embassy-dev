@@ -1,12 +1,17 @@
+//! Clock configuration for the RP2040
+
+#[cfg(feature = "rp2040")]
 use core::arch::asm;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+#[cfg(feature = "rp2040")]
+use core::sync::atomic::AtomicU16;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_hal_internal::{into_ref, PeripheralRef};
 use pac::clocks::vals::*;
 
-use crate::gpio::sealed::Pin;
-use crate::gpio::AnyPin;
+use crate::gpio::{AnyPin, SealedPin};
+#[cfg(feature = "rp2040")]
 use crate::pac::common::{Reg, RW};
 use crate::{pac, reset, Peripheral};
 
@@ -26,6 +31,7 @@ struct Clocks {
     // gpin1: AtomicU32,
     rosc: AtomicU32,
     peri: AtomicU32,
+    #[cfg(feature = "rp2040")]
     rtc: AtomicU16,
 }
 
@@ -41,37 +47,55 @@ static CLOCKS: Clocks = Clocks {
     // gpin1: AtomicU32::new(0),
     rosc: AtomicU32::new(0),
     peri: AtomicU32::new(0),
+    #[cfg(feature = "rp2040")]
     rtc: AtomicU16::new(0),
 };
 
+/// Peripheral clock sources.
 #[repr(u8)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeriClkSrc {
+    /// SYS.
     Sys = ClkPeriCtrlAuxsrc::CLK_SYS as _,
+    /// PLL SYS.
     PllSys = ClkPeriCtrlAuxsrc::CLKSRC_PLL_SYS as _,
+    /// PLL USB.
     PllUsb = ClkPeriCtrlAuxsrc::CLKSRC_PLL_USB as _,
+    /// ROSC.
     Rosc = ClkPeriCtrlAuxsrc::ROSC_CLKSRC_PH as _,
+    /// XOSC.
     Xosc = ClkPeriCtrlAuxsrc::XOSC_CLKSRC as _,
     // Gpin0 = ClkPeriCtrlAuxsrc::CLKSRC_GPIN0 as _ ,
     // Gpin1 = ClkPeriCtrlAuxsrc::CLKSRC_GPIN1 as _ ,
 }
 
+/// CLock configuration.
 #[non_exhaustive]
 pub struct ClockConfig {
+    /// Ring oscillator configuration.
     pub rosc: Option<RoscConfig>,
+    /// External oscillator configuration.
     pub xosc: Option<XoscConfig>,
+    /// Reference clock configuration.
     pub ref_clk: RefClkConfig,
+    /// System clock configuration.
     pub sys_clk: SysClkConfig,
+    /// Peripheral clock source configuration.
     pub peri_clk_src: Option<PeriClkSrc>,
+    /// USB clock configuration.
     pub usb_clk: Option<UsbClkConfig>,
+    /// ADC clock configuration.
     pub adc_clk: Option<AdcClkConfig>,
+    /// RTC clock configuration.
+    #[cfg(feature = "rp2040")]
     pub rtc_clk: Option<RtcClkConfig>,
     // gpin0: Option<(u32, Gpin<'static, AnyPin>)>,
     // gpin1: Option<(u32, Gpin<'static, AnyPin>)>,
 }
 
 impl ClockConfig {
+    /// Clock configuration derived from external crystal.
     pub fn crystal(crystal_hz: u32) -> Self {
         Self {
             rosc: Some(RoscConfig {
@@ -85,7 +109,10 @@ impl ClockConfig {
                 sys_pll: Some(PllConfig {
                     refdiv: 1,
                     fbdiv: 125,
+                    #[cfg(feature = "rp2040")]
                     post_div1: 6,
+                    #[cfg(feature = "_rp235x")]
+                    post_div1: 5,
                     post_div2: 2,
                 }),
                 usb_pll: Some(PllConfig {
@@ -119,6 +146,7 @@ impl ClockConfig {
                 phase: 0,
             }),
             // CLK RTC = PLL USB (48MHz) / 1024 = 46875Hz
+            #[cfg(feature = "rp2040")]
             rtc_clk: Some(RtcClkConfig {
                 src: RtcClkSrc::PllUsb,
                 div_int: 1024,
@@ -130,6 +158,7 @@ impl ClockConfig {
         }
     }
 
+    /// Clock configuration from internal oscillator.
     pub fn rosc() -> Self {
         Self {
             rosc: Some(RoscConfig {
@@ -157,6 +186,7 @@ impl ClockConfig {
                 phase: 0,
             }),
             // CLK RTC = ROSC (140MHz) / 2986.667969 ≅ 46875Hz
+            #[cfg(feature = "rp2040")]
             rtc_clk: Some(RtcClkConfig {
                 src: RtcClkSrc::Rosc,
                 div_int: 2986,
@@ -179,130 +209,200 @@ impl ClockConfig {
     // }
 }
 
+/// ROSC freq range.
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoscRange {
+    /// Low range.
     Low = pac::rosc::vals::FreqRange::LOW.0,
+    /// Medium range (1.33x low)
     Medium = pac::rosc::vals::FreqRange::MEDIUM.0,
+    /// High range (2x low)
     High = pac::rosc::vals::FreqRange::HIGH.0,
+    /// Too high. Should not be used.
     TooHigh = pac::rosc::vals::FreqRange::TOOHIGH.0,
 }
 
+/// On-chip ring oscillator configuration.
 pub struct RoscConfig {
     /// Final frequency of the oscillator, after the divider has been applied.
     /// The oscillator has a nominal frequency of 6.5MHz at medium range with
     /// divider 16 and all drive strengths set to 0, other values should be
     /// measured in situ.
     pub hz: u32,
+    /// Oscillator range.
     pub range: RoscRange,
+    /// Drive strength for oscillator.
     pub drive_strength: [u8; 8],
+    /// Output divider.
     pub div: u16,
 }
 
+/// Crystal oscillator configuration.
 pub struct XoscConfig {
+    /// Final frequency of the oscillator.
     pub hz: u32,
+    /// Configuring PLL for the system clock.
     pub sys_pll: Option<PllConfig>,
+    /// Configuring PLL for the USB clock.
     pub usb_pll: Option<PllConfig>,
+    /// Multiplier for the startup delay.
     pub delay_multiplier: u32,
 }
 
+/// PLL configuration.
 pub struct PllConfig {
+    /// Reference divisor.
     pub refdiv: u8,
+    /// Feedback divisor.
     pub fbdiv: u16,
+    /// Output divisor 1.
     pub post_div1: u8,
+    /// Output divisor 2.
     pub post_div2: u8,
 }
 
+/// Reference clock config.
 pub struct RefClkConfig {
+    /// Reference clock source.
     pub src: RefClkSrc,
+    /// Reference clock divider.
     pub div: u8,
 }
 
+/// Reference clock source.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefClkSrc {
-    // main sources
+    /// XOSC.
     Xosc,
+    /// ROSC.
     Rosc,
-    // aux sources
+    /// PLL USB.
     PllUsb,
     // Gpin0,
     // Gpin1,
 }
 
+/// SYS clock source.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SysClkSrc {
-    // main sources
+    /// REF.
     Ref,
-    // aux sources
+    /// PLL SYS.
     PllSys,
+    /// PLL USB.
     PllUsb,
+    /// ROSC.
     Rosc,
+    /// XOSC.
     Xosc,
     // Gpin0,
     // Gpin1,
 }
 
+/// SYS clock config.
 pub struct SysClkConfig {
+    /// SYS clock source.
     pub src: SysClkSrc,
+    /// SYS clock divider.
+    #[cfg(feature = "rp2040")]
     pub div_int: u32,
+    /// SYS clock fraction.
+    #[cfg(feature = "rp2040")]
     pub div_frac: u8,
+    /// SYS clock divider.
+    #[cfg(feature = "_rp235x")]
+    pub div_int: u16,
+    /// SYS clock fraction.
+    #[cfg(feature = "_rp235x")]
+    pub div_frac: u16,
 }
 
+/// USB clock source.
 #[repr(u8)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UsbClkSrc {
+    /// PLL USB.
     PllUsb = ClkUsbCtrlAuxsrc::CLKSRC_PLL_USB as _,
+    /// PLL SYS.
     PllSys = ClkUsbCtrlAuxsrc::CLKSRC_PLL_SYS as _,
+    /// ROSC.
     Rosc = ClkUsbCtrlAuxsrc::ROSC_CLKSRC_PH as _,
+    /// XOSC.
     Xosc = ClkUsbCtrlAuxsrc::XOSC_CLKSRC as _,
     // Gpin0 = ClkUsbCtrlAuxsrc::CLKSRC_GPIN0 as _ ,
     // Gpin1 = ClkUsbCtrlAuxsrc::CLKSRC_GPIN1 as _ ,
 }
 
+/// USB clock config.
 pub struct UsbClkConfig {
+    /// USB clock source.
     pub src: UsbClkSrc,
+    /// USB clock divider.
     pub div: u8,
+    /// USB clock phase.
     pub phase: u8,
 }
 
+/// ADC clock source.
 #[repr(u8)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdcClkSrc {
+    /// PLL USB.
     PllUsb = ClkAdcCtrlAuxsrc::CLKSRC_PLL_USB as _,
+    /// PLL SYS.
     PllSys = ClkAdcCtrlAuxsrc::CLKSRC_PLL_SYS as _,
+    /// ROSC.
     Rosc = ClkAdcCtrlAuxsrc::ROSC_CLKSRC_PH as _,
+    /// XOSC.
     Xosc = ClkAdcCtrlAuxsrc::XOSC_CLKSRC as _,
     // Gpin0 = ClkAdcCtrlAuxsrc::CLKSRC_GPIN0 as _ ,
     // Gpin1 = ClkAdcCtrlAuxsrc::CLKSRC_GPIN1 as _ ,
 }
 
+/// ADC clock config.
 pub struct AdcClkConfig {
+    /// ADC clock source.
     pub src: AdcClkSrc,
+    /// ADC clock divider.
     pub div: u8,
+    /// ADC clock phase.
     pub phase: u8,
 }
 
+/// RTC clock source.
 #[repr(u8)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "rp2040")]
 pub enum RtcClkSrc {
+    /// PLL USB.
     PllUsb = ClkRtcCtrlAuxsrc::CLKSRC_PLL_USB as _,
+    /// PLL SYS.
     PllSys = ClkRtcCtrlAuxsrc::CLKSRC_PLL_SYS as _,
+    /// ROSC.
     Rosc = ClkRtcCtrlAuxsrc::ROSC_CLKSRC_PH as _,
+    /// XOSC.
     Xosc = ClkRtcCtrlAuxsrc::XOSC_CLKSRC as _,
     // Gpin0 = ClkRtcCtrlAuxsrc::CLKSRC_GPIN0 as _ ,
     // Gpin1 = ClkRtcCtrlAuxsrc::CLKSRC_GPIN1 as _ ,
 }
 
+/// RTC clock config.
+#[cfg(feature = "rp2040")]
 pub struct RtcClkConfig {
+    /// RTC clock source.
     pub src: RtcClkSrc,
+    /// RTC clock divider.
     pub div_int: u32,
+    /// RTC clock divider fraction.
     pub div_frac: u8,
+    /// RTC clock phase.
     pub phase: u8,
 }
 
@@ -319,10 +419,9 @@ pub(crate) unsafe fn init(config: ClockConfig) {
     peris.set_pads_qspi(false);
     peris.set_pll_sys(false);
     peris.set_pll_usb(false);
-    // TODO investigate if usb should be unreset here
     peris.set_usbctrl(false);
     peris.set_syscfg(false);
-    peris.set_rtc(false);
+    //peris.set_rtc(false);
     reset::reset(peris);
 
     // Disable resus that may be enabled from previous software
@@ -332,9 +431,15 @@ pub(crate) unsafe fn init(config: ClockConfig) {
 
     // Before we touch PLLs, switch sys and ref cleanly away from their aux sources.
     c.clk_sys_ctrl().modify(|w| w.set_src(ClkSysCtrlSrc::CLK_REF));
+    #[cfg(feature = "rp2040")]
     while c.clk_sys_selected().read() != 1 {}
+    #[cfg(feature = "_rp235x")]
+    while c.clk_sys_selected().read() != pac::clocks::regs::ClkSysSelected(1) {}
     c.clk_ref_ctrl().modify(|w| w.set_src(ClkRefCtrlSrc::ROSC_CLKSRC_PH));
+    #[cfg(feature = "rp2040")]
     while c.clk_ref_selected().read() != 1 {}
+    #[cfg(feature = "_rp235x")]
+    while c.clk_ref_selected().read() != pac::clocks::regs::ClkRefSelected(1) {}
 
     // Reset the PLLs
     let mut peris = reset::Peripherals(0);
@@ -402,15 +507,26 @@ pub(crate) unsafe fn init(config: ClockConfig) {
         w.set_src(ref_src);
         w.set_auxsrc(ref_aux);
     });
-    while c.clk_ref_selected().read() != 1 << ref_src as u32 {}
+    #[cfg(feature = "rp2040")]
+    while c.clk_ref_selected().read() != (1 << ref_src as u32) {}
+    #[cfg(feature = "_rp235x")]
+    while c.clk_ref_selected().read() != pac::clocks::regs::ClkRefSelected(1 << ref_src as u32) {}
     c.clk_ref_div().write(|w| {
         w.set_int(config.ref_clk.div);
     });
 
+    // Configure tick generation on the 2040.
+    #[cfg(feature = "rp2040")]
     pac::WATCHDOG.tick().write(|w| {
         w.set_cycles((clk_ref_freq / 1_000_000) as u16);
         w.set_enable(true);
     });
+    // Configure tick generator on the 2350
+    #[cfg(feature = "_rp235x")]
+    {
+        pac::TICKS.timer0_cycles().write(|w| w.0 = clk_ref_freq / 1_000_000);
+        pac::TICKS.timer0_ctrl().write(|w| w.set_enable(true));
+    }
 
     let (sys_src, sys_aux, clk_sys_freq) = {
         use {ClkSysCtrlAuxsrc as Aux, ClkSysCtrlSrc as Src};
@@ -423,7 +539,6 @@ pub(crate) unsafe fn init(config: ClockConfig) {
             // SysClkSrc::Gpin0 => (Src::CLKSRC_CLK_SYS_AUX, Aux::CLKSRC_GPIN0, gpin0_freq),
             // SysClkSrc::Gpin1 => (Src::CLKSRC_CLK_SYS_AUX, Aux::CLKSRC_GPIN1, gpin1_freq),
         };
-        assert!(config.sys_clk.div_int <= 0x1000000);
         let div = config.sys_clk.div_int as u64 * 256 + config.sys_clk.div_frac as u64;
         (src, aux, ((freq as u64 * 256) / div) as u32)
     };
@@ -431,13 +546,21 @@ pub(crate) unsafe fn init(config: ClockConfig) {
     CLOCKS.sys.store(clk_sys_freq, Ordering::Relaxed);
     if sys_src != ClkSysCtrlSrc::CLK_REF {
         c.clk_sys_ctrl().write(|w| w.set_src(ClkSysCtrlSrc::CLK_REF));
-        while c.clk_sys_selected().read() != 1 << ClkSysCtrlSrc::CLK_REF as u32 {}
+        #[cfg(feature = "rp2040")]
+        while c.clk_sys_selected().read() != (1 << ClkSysCtrlSrc::CLK_REF as u32) {}
+        #[cfg(feature = "_rp235x")]
+        while c.clk_sys_selected().read() != pac::clocks::regs::ClkSysSelected(1 << ClkSysCtrlSrc::CLK_REF as u32) {}
     }
     c.clk_sys_ctrl().write(|w| {
         w.set_auxsrc(sys_aux);
         w.set_src(sys_src);
     });
-    while c.clk_sys_selected().read() != 1 << sys_src as u32 {}
+
+    #[cfg(feature = "rp2040")]
+    while c.clk_sys_selected().read() != (1 << sys_src as u32) {}
+    #[cfg(feature = "_rp235x")]
+    while c.clk_sys_selected().read() != pac::clocks::regs::ClkSysSelected(1 << sys_src as u32) {}
+
     c.clk_sys_div().write(|w| {
         w.set_int(config.sys_clk.div_int);
         w.set_frac(config.sys_clk.div_frac);
@@ -515,6 +638,8 @@ pub(crate) unsafe fn init(config: ClockConfig) {
         CLOCKS.adc.store(0, Ordering::Relaxed);
     }
 
+    // rp2040 specific clocks
+    #[cfg(feature = "rp2040")]
     if let Some(conf) = config.rtc_clk {
         c.clk_rtc_div().write(|w| {
             w.set_int(conf.div_int);
@@ -542,6 +667,13 @@ pub(crate) unsafe fn init(config: ClockConfig) {
     } else {
         peris.set_rtc(false);
         CLOCKS.rtc.store(0, Ordering::Relaxed);
+    }
+
+    // rp235x specific clocks
+    #[cfg(feature = "_rp235x")]
+    {
+        // TODO hstx clock
+        peris.set_hstx(false);
     }
 
     // Peripheral clocks should now all be running
@@ -579,10 +711,12 @@ fn configure_rosc(config: RoscConfig) -> u32 {
     config.hz
 }
 
+/// ROSC clock frequency.
 pub fn rosc_freq() -> u32 {
     CLOCKS.rosc.load(Ordering::Relaxed)
 }
 
+/// XOSC clock frequency.
 pub fn xosc_freq() -> u32 {
     CLOCKS.xosc.load(Ordering::Relaxed)
 }
@@ -594,43 +728,48 @@ pub fn xosc_freq() -> u32 {
 //     CLOCKS.gpin1.load(Ordering::Relaxed)
 // }
 
+/// PLL SYS clock frequency.
 pub fn pll_sys_freq() -> u32 {
     CLOCKS.pll_sys.load(Ordering::Relaxed)
 }
 
+/// PLL USB clock frequency.
 pub fn pll_usb_freq() -> u32 {
     CLOCKS.pll_usb.load(Ordering::Relaxed)
 }
 
+/// SYS clock frequency.
 pub fn clk_sys_freq() -> u32 {
     CLOCKS.sys.load(Ordering::Relaxed)
 }
 
+/// REF clock frequency.
 pub fn clk_ref_freq() -> u32 {
     CLOCKS.reference.load(Ordering::Relaxed)
 }
 
+/// Peripheral clock frequency.
 pub fn clk_peri_freq() -> u32 {
     CLOCKS.peri.load(Ordering::Relaxed)
 }
 
+/// USB clock frequency.
 pub fn clk_usb_freq() -> u32 {
     CLOCKS.usb.load(Ordering::Relaxed)
 }
 
+/// ADC clock frequency.
 pub fn clk_adc_freq() -> u32 {
     CLOCKS.adc.load(Ordering::Relaxed)
 }
 
+/// RTC clock frequency.
+#[cfg(feature = "rp2040")]
 pub fn clk_rtc_freq() -> u16 {
     CLOCKS.rtc.load(Ordering::Relaxed)
 }
 
 fn start_xosc(crystal_hz: u32, delay_multiplier: u32) {
-    pac::XOSC
-        .ctrl()
-        .write(|w| w.set_freq_range(pac::xosc::vals::CtrlFreqRange::_1_15MHZ));
-
     let startup_delay = (((crystal_hz / 1000) * delay_multiplier) + 128) / 256;
     pac::XOSC.startup().write(|w| w.set_delay(startup_delay as u16));
     pac::XOSC.ctrl().write(|w| {
@@ -649,7 +788,7 @@ fn configure_pll(p: pac::pll::Pll, input_freq: u32, config: PllConfig) -> u32 {
     assert!(config.refdiv >= 1 && config.refdiv <= 63);
     assert!(ref_freq >= 5_000_000 && ref_freq <= 800_000_000);
     let vco_freq = ref_freq.saturating_mul(config.fbdiv as u32);
-    assert!(vco_freq >= 750_000_000 && vco_freq <= 1800_000_000);
+    assert!(vco_freq >= 750_000_000 && vco_freq <= 1_800_000_000);
 
     // Load VCO-related dividers before starting VCO
     p.cs().write(|w| w.set_refdiv(config.refdiv as _));
@@ -682,7 +821,9 @@ fn configure_pll(p: pac::pll::Pll, input_freq: u32, config: PllConfig) -> u32 {
     vco_freq / ((config.post_div1 * config.post_div2) as u32)
 }
 
+/// General purpose input clock pin.
 pub trait GpinPin: crate::gpio::Pin {
+    /// Pin number.
     const NR: usize;
 }
 
@@ -697,16 +838,22 @@ macro_rules! impl_gpinpin {
 impl_gpinpin!(PIN_20, 20, 0);
 impl_gpinpin!(PIN_22, 22, 1);
 
-pub struct Gpin<'d, T: Pin> {
+/// General purpose clock input driver.
+pub struct Gpin<'d, T: GpinPin> {
     gpin: PeripheralRef<'d, AnyPin>,
     _phantom: PhantomData<T>,
 }
 
-impl<'d, T: Pin> Gpin<'d, T> {
-    pub fn new<P: GpinPin>(gpin: impl Peripheral<P = P> + 'd) -> Gpin<'d, P> {
+impl<'d, T: GpinPin> Gpin<'d, T> {
+    /// Create new gpin driver.
+    pub fn new(gpin: impl Peripheral<P = T> + 'd) -> Self {
         into_ref!(gpin);
 
         gpin.gpio().ctrl().write(|w| w.set_funcsel(0x08));
+        #[cfg(feature = "_rp235x")]
+        gpin.pad_ctrl().write(|w| {
+            w.set_iso(false);
+        });
 
         Gpin {
             gpin: gpin.map_into(),
@@ -719,8 +866,9 @@ impl<'d, T: Pin> Gpin<'d, T> {
     // }
 }
 
-impl<'d, T: Pin> Drop for Gpin<'d, T> {
+impl<'d, T: GpinPin> Drop for Gpin<'d, T> {
     fn drop(&mut self) {
+        self.gpin.pad_ctrl().write(|_| {});
         self.gpin
             .gpio()
             .ctrl()
@@ -728,7 +876,9 @@ impl<'d, T: Pin> Drop for Gpin<'d, T> {
     }
 }
 
+/// General purpose clock output pin.
 pub trait GpoutPin: crate::gpio::Pin {
+    /// Pin number.
     fn number(&self) -> usize;
 }
 
@@ -747,34 +897,53 @@ impl_gpoutpin!(PIN_23, 1);
 impl_gpoutpin!(PIN_24, 2);
 impl_gpoutpin!(PIN_25, 3);
 
+/// Gpout clock source.
 #[repr(u8)]
 pub enum GpoutSrc {
+    /// Sys PLL.
     PllSys = ClkGpoutCtrlAuxsrc::CLKSRC_PLL_SYS as _,
     // Gpin0 = ClkGpoutCtrlAuxsrc::CLKSRC_GPIN0 as _ ,
     // Gpin1 = ClkGpoutCtrlAuxsrc::CLKSRC_GPIN1 as _ ,
+    /// USB PLL.
     PllUsb = ClkGpoutCtrlAuxsrc::CLKSRC_PLL_USB as _,
+    /// ROSC.
     Rosc = ClkGpoutCtrlAuxsrc::ROSC_CLKSRC as _,
+    /// XOSC.
     Xosc = ClkGpoutCtrlAuxsrc::XOSC_CLKSRC as _,
+    /// SYS.
     Sys = ClkGpoutCtrlAuxsrc::CLK_SYS as _,
+    /// USB.
     Usb = ClkGpoutCtrlAuxsrc::CLK_USB as _,
+    /// ADC.
     Adc = ClkGpoutCtrlAuxsrc::CLK_ADC as _,
+    /// RTC.
+    #[cfg(feature = "rp2040")]
     Rtc = ClkGpoutCtrlAuxsrc::CLK_RTC as _,
+    /// REF.
     Ref = ClkGpoutCtrlAuxsrc::CLK_REF as _,
 }
 
+/// General purpose clock output driver.
 pub struct Gpout<'d, T: GpoutPin> {
     gpout: PeripheralRef<'d, T>,
 }
 
 impl<'d, T: GpoutPin> Gpout<'d, T> {
+    /// Create new general purpose clock output.
     pub fn new(gpout: impl Peripheral<P = T> + 'd) -> Self {
         into_ref!(gpout);
 
         gpout.gpio().ctrl().write(|w| w.set_funcsel(0x08));
+        #[cfg(feature = "_rp235x")]
+        gpout.pad_ctrl().write(|w| {
+            w.set_iso(false);
+        });
 
         Self { gpout }
     }
 
+    /// Set clock divider.
+    #[cfg(feature = "rp2040")]
     pub fn set_div(&self, int: u32, frac: u8) {
         let c = pac::CLOCKS;
         c.clk_gpout_div(self.gpout.number()).write(|w| {
@@ -783,6 +952,17 @@ impl<'d, T: GpoutPin> Gpout<'d, T> {
         });
     }
 
+    /// Set clock divider.
+    #[cfg(feature = "_rp235x")]
+    pub fn set_div(&self, int: u16, frac: u16) {
+        let c = pac::CLOCKS;
+        c.clk_gpout_div(self.gpout.number()).write(|w| {
+            w.set_int(int);
+            w.set_frac(frac);
+        });
+    }
+
+    /// Set clock source.
     pub fn set_src(&self, src: GpoutSrc) {
         let c = pac::CLOCKS;
         c.clk_gpout_ctrl(self.gpout.number()).modify(|w| {
@@ -790,6 +970,7 @@ impl<'d, T: GpoutPin> Gpout<'d, T> {
         });
     }
 
+    /// Enable clock.
     pub fn enable(&self) {
         let c = pac::CLOCKS;
         c.clk_gpout_ctrl(self.gpout.number()).modify(|w| {
@@ -797,6 +978,7 @@ impl<'d, T: GpoutPin> Gpout<'d, T> {
         });
     }
 
+    /// Disable clock.
     pub fn disable(&self) {
         let c = pac::CLOCKS;
         c.clk_gpout_ctrl(self.gpout.number()).modify(|w| {
@@ -804,6 +986,7 @@ impl<'d, T: GpoutPin> Gpout<'d, T> {
         });
     }
 
+    /// Clock frequency.
     pub fn get_freq(&self) -> u32 {
         let c = pac::CLOCKS;
         let src = c.clk_gpout_ctrl(self.gpout.number()).read().auxsrc();
@@ -818,13 +1001,13 @@ impl<'d, T: GpoutPin> Gpout<'d, T> {
             ClkGpoutCtrlAuxsrc::CLK_SYS => clk_sys_freq(),
             ClkGpoutCtrlAuxsrc::CLK_USB => clk_usb_freq(),
             ClkGpoutCtrlAuxsrc::CLK_ADC => clk_adc_freq(),
-            ClkGpoutCtrlAuxsrc::CLK_RTC => clk_rtc_freq() as _,
+            //ClkGpoutCtrlAuxsrc::CLK_RTC => clk_rtc_freq() as _,
             ClkGpoutCtrlAuxsrc::CLK_REF => clk_ref_freq(),
             _ => unreachable!(),
         };
 
         let div = c.clk_gpout_div(self.gpout.number()).read();
-        let int = if div.int() == 0 { 65536 } else { div.int() } as u64;
+        let int = if div.int() == 0 { 0xFFFF } else { div.int() } as u64;
         let frac = div.frac() as u64;
 
         ((base as u64 * 256) / (int * 256 + frac)) as u32
@@ -834,6 +1017,7 @@ impl<'d, T: GpoutPin> Gpout<'d, T> {
 impl<'d, T: GpoutPin> Drop for Gpout<'d, T> {
     fn drop(&mut self) {
         self.disable();
+        self.gpout.pad_ctrl().write(|_| {});
         self.gpout
             .gpio()
             .ctrl()
@@ -881,7 +1065,7 @@ impl rand_core::RngCore for RoscRng {
 /// and can only be exited through resets, dormant-wake GPIO interrupts,
 /// and RTC interrupts. If RTC is clocked from an internal clock source
 /// it will be stopped and not function as a wakeup source.
-#[cfg(target_arch = "arm")]
+#[cfg(all(target_arch = "arm", feature = "rp2040"))]
 pub fn dormant_sleep() {
     struct Set<T: Copy, F: Fn()>(Reg<T, RW>, T, F);
 
@@ -917,7 +1101,7 @@ pub fn dormant_sleep() {
     let _stop_adc = set(pac::CLOCKS.clk_adc_ctrl(), |w| w.set_enable(false));
     let _stop_usb = set(pac::CLOCKS.clk_usb_ctrl(), |w| w.set_enable(false));
     let _stop_peri = set(pac::CLOCKS.clk_peri_ctrl(), |w| w.set_enable(false));
-    // set up rosc. we could ask the use to tell us which clock source to wake from like
+    // set up rosc. we could ask the user to tell us which clock source to wake from like
     // the C SDK does, but that seems rather unfriendly. we *may* disturb rtc by changing
     // rosc configuration if it's currently the rtc clock source, so we'll configure rosc
     // to the slowest frequency to minimize that impact.
@@ -1001,7 +1185,7 @@ pub fn dormant_sleep() {
                 coma = in (reg) 0x636f6d61,
             );
         } else {
-            pac::ROSC.dormant().write_value(0x636f6d61);
+            pac::ROSC.dormant().write_value(rp_pac::rosc::regs::Dormant(0x636f6d61));
         }
     }
 }

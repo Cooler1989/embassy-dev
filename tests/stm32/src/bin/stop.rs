@@ -2,7 +2,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 #[path = "../common.rs"]
 mod common;
 
@@ -15,7 +14,7 @@ use embassy_stm32::rcc::LsConfig;
 use embassy_stm32::rtc::{Rtc, RtcConfig};
 use embassy_stm32::Config;
 use embassy_time::Timer;
-use static_cell::make_static;
+use static_cell::StaticCell;
 
 #[entry]
 fn main() -> ! {
@@ -52,7 +51,14 @@ async fn async_main(spawner: Spawner) {
     let mut config = Config::default();
     config.rcc.ls = LsConfig::default_lse();
 
-    let p = embassy_stm32::init(config);
+    // System Clock seems cannot be greater than 16 MHz
+    #[cfg(any(feature = "stm32h563zi", feature = "stm32h503rb"))]
+    {
+        use embassy_stm32::rcc::HSIPrescaler;
+        config.rcc.hsi = Some(HSIPrescaler::DIV4); // 64 MHz HSI will need a /4
+    }
+
+    let p = init_with_config(config);
     info!("Hello World!");
 
     let now = NaiveDate::from_ymd_opt(2020, 5, 15)
@@ -64,7 +70,8 @@ async fn async_main(spawner: Spawner) {
 
     rtc.set_datetime(now.into()).expect("datetime not set");
 
-    let rtc = make_static!(rtc);
+    static RTC: StaticCell<Rtc> = StaticCell::new();
+    let rtc = RTC.init(rtc);
 
     stop_with_rtc(rtc);
 

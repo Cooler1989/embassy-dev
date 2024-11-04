@@ -1,16 +1,12 @@
-#![feature(type_alias_impl_trait)]
-
-use std::default::Default;
-
 use clap::Parser;
 use embassy_executor::{Executor, Spawner};
 use embassy_net::dns::DnsQueryType;
-use embassy_net::{Config, Ipv4Address, Ipv4Cidr, Stack, StackResources};
+use embassy_net::{Config, Ipv4Address, Ipv4Cidr, StackResources};
 use embassy_net_tuntap::TunTapDevice;
 use heapless::Vec;
 use log::*;
 use rand_core::{OsRng, RngCore};
-use static_cell::{make_static, StaticCell};
+use static_cell::StaticCell;
 
 #[derive(Parser)]
 #[clap(version = "1.0")]
@@ -24,8 +20,8 @@ struct Opts {
 }
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<TunTapDevice>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, TunTapDevice>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::task]
@@ -53,15 +49,11 @@ async fn main_task(spawner: Spawner) {
     let seed = u64::from_le_bytes(seed);
 
     // Init network stack
-    let stack: &Stack<_> = &*make_static!(Stack::new(
-        device,
-        config,
-        make_static!(StackResources::<3>::new()),
-        seed
-    ));
+    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+    let (stack, runner) = embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
 
     // Launch network task
-    spawner.spawn(net_task(stack)).unwrap();
+    spawner.spawn(net_task(runner)).unwrap();
 
     let host = "example.com";
     info!("querying host {:?}...", host);

@@ -7,10 +7,10 @@ use embassy_hal_internal::{into_ref, PeripheralRef};
 pub use embedded_hal_02::spi::{Phase, Polarity};
 
 use crate::dma::{AnyChannel, Channel};
-use crate::gpio::sealed::Pin as _;
-use crate::gpio::{AnyPin, Pin as GpioPin};
+use crate::gpio::{AnyPin, Pin as GpioPin, SealedPin as _};
 use crate::{pac, peripherals, Peripheral};
 
+/// SPI errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[non_exhaustive]
@@ -18,11 +18,15 @@ pub enum Error {
     // No errors for now
 }
 
+/// SPI configuration.
 #[non_exhaustive]
 #[derive(Clone)]
 pub struct Config {
+    /// Frequency.
     pub frequency: u32,
+    /// Phase.
     pub phase: Phase,
+    /// Polarity.
     pub polarity: Polarity,
 }
 
@@ -36,6 +40,7 @@ impl Default for Config {
     }
 }
 
+/// SPI driver.
 pub struct Spi<'d, T: Instance, M: Mode> {
     inner: PeripheralRef<'d, T>,
     tx_dma: Option<PeripheralRef<'d, AnyChannel>>,
@@ -101,15 +106,55 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
 
         if let Some(pin) = &clk {
             pin.gpio().ctrl().write(|w| w.set_funcsel(1));
+            pin.pad_ctrl().write(|w| {
+                #[cfg(feature = "_rp235x")]
+                w.set_iso(false);
+                w.set_schmitt(true);
+                w.set_slewfast(false);
+                w.set_ie(true);
+                w.set_od(false);
+                w.set_pue(false);
+                w.set_pde(false);
+            });
         }
         if let Some(pin) = &mosi {
             pin.gpio().ctrl().write(|w| w.set_funcsel(1));
+            pin.pad_ctrl().write(|w| {
+                #[cfg(feature = "_rp235x")]
+                w.set_iso(false);
+                w.set_schmitt(true);
+                w.set_slewfast(false);
+                w.set_ie(true);
+                w.set_od(false);
+                w.set_pue(false);
+                w.set_pde(false);
+            });
         }
         if let Some(pin) = &miso {
             pin.gpio().ctrl().write(|w| w.set_funcsel(1));
+            pin.pad_ctrl().write(|w| {
+                #[cfg(feature = "_rp235x")]
+                w.set_iso(false);
+                w.set_schmitt(true);
+                w.set_slewfast(false);
+                w.set_ie(true);
+                w.set_od(false);
+                w.set_pue(false);
+                w.set_pde(false);
+            });
         }
         if let Some(pin) = &cs {
             pin.gpio().ctrl().write(|w| w.set_funcsel(1));
+            pin.pad_ctrl().write(|w| {
+                #[cfg(feature = "_rp235x")]
+                w.set_iso(false);
+                w.set_schmitt(true);
+                w.set_slewfast(false);
+                w.set_ie(true);
+                w.set_od(false);
+                w.set_pue(false);
+                w.set_pde(false);
+            });
         }
         Self {
             inner,
@@ -119,6 +164,7 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
         }
     }
 
+    /// Write data to SPI blocking execution until done.
     pub fn blocking_write(&mut self, data: &[u8]) -> Result<(), Error> {
         let p = self.inner.regs();
         for &b in data {
@@ -131,6 +177,7 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
         Ok(())
     }
 
+    /// Transfer data in place to SPI blocking execution until done.
     pub fn blocking_transfer_in_place(&mut self, data: &mut [u8]) -> Result<(), Error> {
         let p = self.inner.regs();
         for b in data {
@@ -143,6 +190,7 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
         Ok(())
     }
 
+    /// Read data from SPI blocking execution until done.
     pub fn blocking_read(&mut self, data: &mut [u8]) -> Result<(), Error> {
         let p = self.inner.regs();
         for b in data {
@@ -155,6 +203,7 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
         Ok(())
     }
 
+    /// Transfer data to SPI blocking execution until done.
     pub fn blocking_transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Error> {
         let p = self.inner.regs();
         let len = read.len().max(write.len());
@@ -172,12 +221,14 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
         Ok(())
     }
 
+    /// Block execution until SPI is done.
     pub fn flush(&mut self) -> Result<(), Error> {
         let p = self.inner.regs();
         while p.sr().read().bsy() {}
         Ok(())
     }
 
+    /// Set SPI frequency.
     pub fn set_frequency(&mut self, freq: u32) {
         let (presc, postdiv) = calc_prescs(freq);
         let p = self.inner.regs();
@@ -196,6 +247,7 @@ impl<'d, T: Instance, M: Mode> Spi<'d, T, M> {
 }
 
 impl<'d, T: Instance> Spi<'d, T, Blocking> {
+    /// Create an SPI driver in blocking mode.
     pub fn new_blocking(
         inner: impl Peripheral<P = T> + 'd,
         clk: impl Peripheral<P = impl ClkPin<T> + 'd> + 'd,
@@ -216,6 +268,7 @@ impl<'d, T: Instance> Spi<'d, T, Blocking> {
         )
     }
 
+    /// Create an SPI driver in blocking mode supporting writes only.
     pub fn new_blocking_txonly(
         inner: impl Peripheral<P = T> + 'd,
         clk: impl Peripheral<P = impl ClkPin<T> + 'd> + 'd,
@@ -235,6 +288,7 @@ impl<'d, T: Instance> Spi<'d, T, Blocking> {
         )
     }
 
+    /// Create an SPI driver in blocking mode supporting reads only.
     pub fn new_blocking_rxonly(
         inner: impl Peripheral<P = T> + 'd,
         clk: impl Peripheral<P = impl ClkPin<T> + 'd> + 'd,
@@ -256,6 +310,7 @@ impl<'d, T: Instance> Spi<'d, T, Blocking> {
 }
 
 impl<'d, T: Instance> Spi<'d, T, Async> {
+    /// Create an SPI driver in async mode supporting DMA operations.
     pub fn new(
         inner: impl Peripheral<P = T> + 'd,
         clk: impl Peripheral<P = impl ClkPin<T> + 'd> + 'd,
@@ -278,6 +333,7 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
         )
     }
 
+    /// Create an SPI driver in async mode supporting DMA write operations only.
     pub fn new_txonly(
         inner: impl Peripheral<P = T> + 'd,
         clk: impl Peripheral<P = impl ClkPin<T> + 'd> + 'd,
@@ -298,6 +354,7 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
         )
     }
 
+    /// Create an SPI driver in async mode supporting DMA read operations only.
     pub fn new_rxonly(
         inner: impl Peripheral<P = T> + 'd,
         clk: impl Peripheral<P = impl ClkPin<T> + 'd> + 'd,
@@ -318,6 +375,7 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
         )
     }
 
+    /// Write data to SPI using DMA.
     pub async fn write(&mut self, buffer: &[u8]) -> Result<(), Error> {
         let tx_ch = self.tx_dma.as_mut().unwrap();
         let tx_transfer = unsafe {
@@ -340,6 +398,7 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
         Ok(())
     }
 
+    /// Read data from SPI using DMA.
     pub async fn read(&mut self, buffer: &mut [u8]) -> Result<(), Error> {
         // Start RX first. Transfer starts when TX starts, if RX
         // is not started yet we might lose bytes.
@@ -365,25 +424,24 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
         Ok(())
     }
 
+    /// Transfer data to SPI using DMA.
     pub async fn transfer(&mut self, rx_buffer: &mut [u8], tx_buffer: &[u8]) -> Result<(), Error> {
         self.transfer_inner(rx_buffer, tx_buffer).await
     }
 
+    /// Transfer data in place to SPI using DMA.
     pub async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Error> {
         self.transfer_inner(words, words).await
     }
 
-    async fn transfer_inner(&mut self, rx_ptr: *mut [u8], tx_ptr: *const [u8]) -> Result<(), Error> {
-        let (_, tx_len) = crate::dma::slice_ptr_parts(tx_ptr);
-        let (_, rx_len) = crate::dma::slice_ptr_parts_mut(rx_ptr);
-
+    async fn transfer_inner(&mut self, rx: *mut [u8], tx: *const [u8]) -> Result<(), Error> {
         // Start RX first. Transfer starts when TX starts, if RX
         // is not started yet we might lose bytes.
         let rx_ch = self.rx_dma.as_mut().unwrap();
         let rx_transfer = unsafe {
             // If we don't assign future to a variable, the data register pointer
             // is held across an await and makes the future non-Send.
-            crate::dma::read(rx_ch, self.inner.regs().dr().as_ptr() as *const _, rx_ptr, T::RX_DREQ)
+            crate::dma::read(rx_ch, self.inner.regs().dr().as_ptr() as *const _, rx, T::RX_DREQ)
         };
 
         let mut tx_ch = self.tx_dma.as_mut().unwrap();
@@ -392,10 +450,10 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
         let tx_transfer = async {
             let p = self.inner.regs();
             unsafe {
-                crate::dma::write(&mut tx_ch, tx_ptr, p.dr().as_ptr() as *mut _, T::TX_DREQ).await;
+                crate::dma::write(&mut tx_ch, tx, p.dr().as_ptr() as *mut _, T::TX_DREQ).await;
 
-                if rx_len > tx_len {
-                    let write_bytes_len = rx_len - tx_len;
+                if rx.len() > tx.len() {
+                    let write_bytes_len = rx.len() - tx.len();
                     // write dummy data
                     // this will disable incrementation of the buffers
                     crate::dma::write_repeated(tx_ch, p.dr().as_ptr() as *mut u8, write_bytes_len, T::TX_DREQ).await
@@ -405,7 +463,7 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
         join(tx_transfer, rx_transfer).await;
 
         // if tx > rx we should clear any overflow of the FIFO SPI buffer
-        if tx_len > rx_len {
+        if tx.len() > rx.len() {
             let p = self.inner.regs();
             while p.sr().read().bsy() {}
 
@@ -421,27 +479,28 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
     }
 }
 
-mod sealed {
-    use super::*;
+trait SealedMode {}
 
-    pub trait Mode {}
+trait SealedInstance {
+    const TX_DREQ: pac::dma::vals::TreqSel;
+    const RX_DREQ: pac::dma::vals::TreqSel;
 
-    pub trait Instance {
-        const TX_DREQ: u8;
-        const RX_DREQ: u8;
-
-        fn regs(&self) -> pac::spi::Spi;
-    }
+    fn regs(&self) -> pac::spi::Spi;
 }
 
-pub trait Mode: sealed::Mode {}
-pub trait Instance: sealed::Instance {}
+/// Mode.
+#[allow(private_bounds)]
+pub trait Mode: SealedMode {}
+
+/// SPI instance trait.
+#[allow(private_bounds)]
+pub trait Instance: SealedInstance {}
 
 macro_rules! impl_instance {
     ($type:ident, $irq:ident, $tx_dreq:expr, $rx_dreq:expr) => {
-        impl sealed::Instance for peripherals::$type {
-            const TX_DREQ: u8 = $tx_dreq;
-            const RX_DREQ: u8 = $rx_dreq;
+        impl SealedInstance for peripherals::$type {
+            const TX_DREQ: pac::dma::vals::TreqSel = $tx_dreq;
+            const RX_DREQ: pac::dma::vals::TreqSel = $rx_dreq;
 
             fn regs(&self) -> pac::spi::Spi {
                 pac::$type
@@ -451,12 +510,26 @@ macro_rules! impl_instance {
     };
 }
 
-impl_instance!(SPI0, Spi0, 16, 17);
-impl_instance!(SPI1, Spi1, 18, 19);
+impl_instance!(
+    SPI0,
+    Spi0,
+    pac::dma::vals::TreqSel::SPI0_TX,
+    pac::dma::vals::TreqSel::SPI0_RX
+);
+impl_instance!(
+    SPI1,
+    Spi1,
+    pac::dma::vals::TreqSel::SPI1_TX,
+    pac::dma::vals::TreqSel::SPI1_RX
+);
 
+/// CLK pin.
 pub trait ClkPin<T: Instance>: GpioPin {}
+/// CS pin.
 pub trait CsPin<T: Instance>: GpioPin {}
+/// MOSI pin.
 pub trait MosiPin<T: Instance>: GpioPin {}
+/// MISO pin.
 pub trait MisoPin<T: Instance>: GpioPin {}
 
 macro_rules! impl_pin {
@@ -495,15 +568,53 @@ impl_pin!(PIN_26, SPI1, ClkPin);
 impl_pin!(PIN_27, SPI1, MosiPin);
 impl_pin!(PIN_28, SPI1, MisoPin);
 impl_pin!(PIN_29, SPI1, CsPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_30, SPI1, ClkPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_31, SPI1, MosiPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_32, SPI0, MisoPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_33, SPI0, CsPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_34, SPI0, ClkPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_35, SPI0, MosiPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_36, SPI0, MisoPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_37, SPI0, CsPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_38, SPI0, ClkPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_39, SPI0, MosiPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_40, SPI1, MisoPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_41, SPI1, CsPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_42, SPI1, ClkPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_43, SPI1, MosiPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_44, SPI1, MisoPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_45, SPI1, CsPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_46, SPI1, ClkPin);
+#[cfg(feature = "rp235xb")]
+impl_pin!(PIN_47, SPI1, MosiPin);
 
 macro_rules! impl_mode {
     ($name:ident) => {
-        impl sealed::Mode for $name {}
+        impl SealedMode for $name {}
         impl Mode for $name {}
     };
 }
 
+/// Blocking mode.
 pub struct Blocking;
+/// Async mode.
 pub struct Async;
 
 impl_mode!(Blocking);

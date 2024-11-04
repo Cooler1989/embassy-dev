@@ -10,7 +10,7 @@ use embassy_stm32::gpio::{Flex, Input, Level, Output, OutputOpenDrain, Pull, Spe
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    let p = embassy_stm32::init(config());
+    let p = init();
     info!("Hello World!");
 
     // Arduino pins D0 and D1
@@ -20,10 +20,10 @@ async fn main(_spawner: Spawner) {
 
     // Test initial output
     {
-        let mut b = Input::new(&mut b, Pull::None);
+        let b = Input::new(&mut b, Pull::None);
 
         {
-            let mut a = Output::new(&mut a, Level::Low, Speed::Low);
+            let a = Output::new(&mut a, Level::Low, Speed::Low);
             delay();
             assert!(b.is_low());
             assert!(!b.is_high());
@@ -68,7 +68,7 @@ async fn main(_spawner: Spawner) {
 
     // Test input no pull
     {
-        let mut b = Input::new(&mut b, Pull::None);
+        let b = Input::new(&mut b, Pull::None);
         // no pull, the status is undefined
 
         let mut a = Output::new(&mut a, Level::Low, Speed::Low);
@@ -81,7 +81,7 @@ async fn main(_spawner: Spawner) {
 
     // Test input pulldown
     {
-        let mut b = Input::new(&mut b, Pull::Down);
+        let b = Input::new(&mut b, Pull::Down);
         delay();
         assert!(b.is_low());
 
@@ -95,7 +95,7 @@ async fn main(_spawner: Spawner) {
 
     // Test input pullup
     {
-        let mut b = Input::new(&mut b, Pull::Up);
+        let b = Input::new(&mut b, Pull::Up);
         delay();
         assert!(b.is_high());
 
@@ -109,10 +109,10 @@ async fn main(_spawner: Spawner) {
 
     // Test output open drain
     {
-        let mut b = Input::new(&mut b, Pull::Down);
+        let b = Input::new(&mut b, Pull::Down);
         // no pull, the status is undefined
 
-        let mut a = OutputOpenDrain::new(&mut a, Level::Low, Speed::Low, Pull::None);
+        let mut a = OutputOpenDrain::new(&mut a, Level::Low, Speed::Low);
         delay();
         assert!(b.is_low());
         a.set_high(); // High-Z output
@@ -203,7 +203,7 @@ async fn main(_spawner: Spawner) {
 
         let mut a = Flex::new(&mut a);
         a.set_low();
-        a.set_as_input_output(Speed::Low, Pull::None);
+        a.set_as_input_output(Speed::Low);
         delay();
         assert!(b.is_low());
         a.set_high(); // High-Z output
@@ -216,7 +216,12 @@ async fn main(_spawner: Spawner) {
 }
 
 fn delay() {
-    #[cfg(any(feature = "stm32h755zi", feature = "stm32h753zi", feature = "stm32h7a3zi"))]
+    #[cfg(any(
+        feature = "stm32h755zi",
+        feature = "stm32h753zi",
+        feature = "stm32h7a3zi",
+        feature = "stm32h7s3l8"
+    ))]
     cortex_m::asm::delay(9000);
     cortex_m::asm::delay(1000);
 }

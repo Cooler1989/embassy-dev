@@ -1,11 +1,10 @@
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{Ipv4Address, Stack, StackResources};
+use embassy_net::{Ipv4Address, StackResources};
 use embassy_stm32::eth::generic_smi::GenericSMI;
 use embassy_stm32::eth::{Ethernet, PacketQueue};
 use embassy_stm32::peripherals::ETH;
@@ -14,7 +13,7 @@ use embassy_stm32::{bind_interrupts, eth, peripherals, rng, Config};
 use embassy_time::Timer;
 use embedded_io_async::Write;
 use rand_core::RngCore;
-use static_cell::make_static;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -25,8 +24,8 @@ bind_interrupts!(struct Irqs {
 type Device = Ethernet<'static, ETH, GenericSMI>;
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<Device>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, Device>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::main]
@@ -64,19 +63,22 @@ async fn main(spawner: Spawner) -> ! {
 
     let mac_addr = [0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
 
+    static PACKETS: StaticCell<PacketQueue<4, 4>> = StaticCell::new();
+    // warning: Not all STM32H7 devices have the exact same pins here
+    // for STM32H747XIH, replace p.PB13 for PG12
     let device = Ethernet::new(
-        make_static!(PacketQueue::<16, 16>::new()),
+        PACKETS.init(PacketQueue::<4, 4>::new()),
         p.ETH,
         Irqs,
-        p.PA1,
-        p.PA2,
-        p.PC1,
-        p.PA7,
-        p.PC4,
-        p.PC5,
-        p.PG13,
-        p.PB13,
-        p.PG11,
+        p.PA1,  // ref_clk
+        p.PA2,  // mdio
+        p.PC1,  // eth_mdc
+        p.PA7,  // CRS_DV: Carrier Sense
+        p.PC4,  // RX_D0: Received Bit 0
+        p.PC5,  // RX_D1: Received Bit 1
+        p.PG13, // TX_D0: Transmit Bit 0
+        p.PB13, // TX_D1: Transmit Bit 1
+        p.PG11, // TX_EN: Transmit Enable
         GenericSMI::new(0),
         mac_addr,
     );
@@ -89,15 +91,11 @@ async fn main(spawner: Spawner) -> ! {
     //});
 
     // Init network stack
-    let stack = &*make_static!(Stack::new(
-        device,
-        config,
-        make_static!(StackResources::<3>::new()),
-        seed
-    ));
+    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+    let (stack, runner) = embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
 
     // Launch network task
-    unwrap!(spawner.spawn(net_task(&stack)));
+    unwrap!(spawner.spawn(net_task(runner)));
 
     // Ensure DHCP configuration is up before trying connect
     stack.wait_config_up().await;
@@ -109,7 +107,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut tx_buffer = [0; 1024];
 
     loop {
-        let mut socket = TcpSocket::new(&stack, &mut rx_buffer, &mut tx_buffer);
+        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
 
         socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
 

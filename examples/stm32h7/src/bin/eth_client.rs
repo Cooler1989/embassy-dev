@@ -1,11 +1,12 @@
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
+
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_net::tcp::client::{TcpClient, TcpClientState};
-use embassy_net::{Stack, StackResources};
+use embassy_net::StackResources;
 use embassy_stm32::eth::generic_smi::GenericSMI;
 use embassy_stm32::eth::{Ethernet, PacketQueue};
 use embassy_stm32::peripherals::ETH;
@@ -13,9 +14,9 @@ use embassy_stm32::rng::Rng;
 use embassy_stm32::{bind_interrupts, eth, peripherals, rng, Config};
 use embassy_time::Timer;
 use embedded_io_async::Write;
-use embedded_nal_async::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpConnect};
+use embedded_nal_async::TcpConnect;
 use rand_core::RngCore;
-use static_cell::make_static;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -26,8 +27,8 @@ bind_interrupts!(struct Irqs {
 type Device = Ethernet<'static, ETH, GenericSMI>;
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<Device>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, Device>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::main]
@@ -65,8 +66,10 @@ async fn main(spawner: Spawner) -> ! {
 
     let mac_addr = [0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
 
+    static PACKETS: StaticCell<PacketQueue<4, 4>> = StaticCell::new();
+
     let device = Ethernet::new(
-        make_static!(PacketQueue::<16, 16>::new()),
+        PACKETS.init(PacketQueue::<4, 4>::new()),
         p.ETH,
         Irqs,
         p.PA1,
@@ -90,15 +93,11 @@ async fn main(spawner: Spawner) -> ! {
     //});
 
     // Init network stack
-    let stack = &*make_static!(Stack::new(
-        device,
-        config,
-        make_static!(StackResources::<3>::new()),
-        seed
-    ));
+    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+    let (stack, runner) = embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
 
     // Launch network task
-    unwrap!(spawner.spawn(net_task(stack)));
+    unwrap!(spawner.spawn(net_task(runner)));
 
     // Ensure DHCP configuration is up before trying connect
     stack.wait_config_up().await;
@@ -106,7 +105,7 @@ async fn main(spawner: Spawner) -> ! {
     info!("Network task initialized");
 
     let state: TcpClientState<1, 1024, 1024> = TcpClientState::new();
-    let client = TcpClient::new(&stack, &state);
+    let client = TcpClient::new(stack, &state);
 
     loop {
         // You need to start a server on the host machine, for example: `nc -l 8000`

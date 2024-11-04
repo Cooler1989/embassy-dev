@@ -1,12 +1,12 @@
+// required-features: nrf52840
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 teleprobe_meta::target!(b"ak-gwe-r7");
 teleprobe_meta::timeout!(120);
 
 use defmt::{info, unwrap};
 use embassy_executor::Spawner;
-use embassy_net::{Stack, StackResources};
+use embassy_net::StackResources;
 use embassy_net_enc28j60::Enc28j60;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::rng::Rng;
@@ -14,7 +14,7 @@ use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{bind_interrupts, peripherals};
 use embassy_time::Delay;
 use embedded_hal_bus::spi::ExclusiveDevice;
-use static_cell::make_static;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
@@ -22,14 +22,11 @@ bind_interrupts!(struct Irqs {
     RNG => embassy_nrf::rng::InterruptHandler<peripherals::RNG>;
 });
 
-type MyDriver = Enc28j60<
-    ExclusiveDevice<Spim<'static, peripherals::SPI3>, Output<'static, peripherals::P0_15>, Delay>,
-    Output<'static, peripherals::P0_13>,
->;
+type MyDriver = Enc28j60<ExclusiveDevice<Spim<'static, peripherals::SPI3>, Output<'static>, Delay>, Output<'static>>;
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<MyDriver>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, MyDriver>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::main]
@@ -68,14 +65,10 @@ async fn main(spawner: Spawner) {
     let seed = u64::from_le_bytes(seed);
 
     // Init network stack
-    let stack = &*make_static!(Stack::new(
-        device,
-        config,
-        make_static!(StackResources::<2>::new()),
-        seed
-    ));
+    static RESOURCES: StaticCell<StackResources<2>> = StaticCell::new();
+    let (stack, runner) = embassy_net::new(device, config, RESOURCES.init(StackResources::new()), seed);
 
-    unwrap!(spawner.spawn(net_task(stack)));
+    unwrap!(spawner.spawn(net_task(runner)));
 
     perf_client::run(
         stack,

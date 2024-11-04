@@ -5,7 +5,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(type_alias_impl_trait)]
 
 use defmt::*;
 use embassy_executor::Spawner;
@@ -15,13 +14,13 @@ use embassy_net_wiznet::chip::W5500;
 use embassy_net_wiznet::*;
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{PIN_17, PIN_20, PIN_21, SPI0};
+use embassy_rp::peripherals::SPI0;
 use embassy_rp::spi::{Async, Config as SpiConfig, Spi};
 use embassy_time::{Delay, Duration};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_io_async::Write;
 use rand::RngCore;
-use static_cell::make_static;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 #[embassy_executor::task]
@@ -29,17 +28,17 @@ async fn ethernet_task(
     runner: Runner<
         'static,
         W5500,
-        ExclusiveDevice<Spi<'static, SPI0, Async>, Output<'static, PIN_17>, Delay>,
-        Input<'static, PIN_21>,
-        Output<'static, PIN_20>,
+        ExclusiveDevice<Spi<'static, SPI0, Async>, Output<'static>, Delay>,
+        Input<'static>,
+        Output<'static>,
     >,
 ) -> ! {
     runner.run().await
 }
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<Device<'static>>) -> ! {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, Device<'static>>) -> ! {
+    runner.run().await
 }
 
 #[embassy_executor::main]
@@ -57,7 +56,8 @@ async fn main(spawner: Spawner) {
     let w5500_reset = Output::new(p.PIN_20, Level::High);
 
     let mac_addr = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00];
-    let state = make_static!(State::<8, 8>::new());
+    static STATE: StaticCell<State<8, 8>> = StaticCell::new();
+    let state = STATE.init(State::<8, 8>::new());
     let (device, runner) = embassy_net_wiznet::new(
         mac_addr,
         state,
@@ -65,22 +65,24 @@ async fn main(spawner: Spawner) {
         w5500_int,
         w5500_reset,
     )
-    .await;
+    .await
+    .unwrap();
     unwrap!(spawner.spawn(ethernet_task(runner)));
 
     // Generate random seed
     let seed = rng.next_u64();
 
     // Init network stack
-    let stack = &*make_static!(Stack::new(
+    static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+    let (stack, runner) = embassy_net::new(
         device,
         embassy_net::Config::dhcpv4(Default::default()),
-        make_static!(StackResources::<2>::new()),
-        seed
-    ));
+        RESOURCES.init(StackResources::new()),
+        seed,
+    );
 
     // Launch network task
-    unwrap!(spawner.spawn(net_task(&stack)));
+    unwrap!(spawner.spawn(net_task(runner)));
 
     info!("Waiting for DHCP...");
     let cfg = wait_for_config(stack).await;
@@ -125,7 +127,7 @@ async fn main(spawner: Spawner) {
     }
 }
 
-async fn wait_for_config(stack: &'static Stack<Device<'static>>) -> embassy_net::StaticConfigV4 {
+async fn wait_for_config(stack: Stack<'static>) -> embassy_net::StaticConfigV4 {
     loop {
         if let Some(config) = stack.config_v4() {
             return config.clone();

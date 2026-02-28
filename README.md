@@ -1,3 +1,5 @@
+MAC for rp2350: 2C:CF:67:B3:A5:66
+
 # Embassy
 
 Embassy is the next-generation framework for embedded applications. Write safe, correct, and energy-efficient embedded code faster, using the Rust programming language, its async facilities, and the Embassy libraries.
@@ -13,17 +15,17 @@ Rust's [async/await](https://rust-lang.github.io/async-book/) allows for unprece
 ## Batteries included
 
 - **Hardware Abstraction Layers**
-    - HALs implement safe, idiomatic Rust APIs to use the hardware capabilities, so raw register manipulation is not needed. The Embassy project maintains HALs for select hardware, but you can still use HALs from other projects with Embassy.
-    - [embassy-stm32](https://docs.embassy.dev/embassy-stm32/), for all STM32 microcontroller families.
-    - [embassy-nrf](https://docs.embassy.dev/embassy-nrf/), for the Nordic Semiconductor nRF52, nRF53, nRF54 and nRF91 series.
-    - [embassy-rp](https://docs.embassy.dev/embassy-rp/), for the Raspberry Pi RP2040 and RP23xx microcontrollers.
-    - [embassy-mspm0](https://docs.embassy.dev/embassy-mspm0/), for the Texas Instruments MSPM0 microcontrollers.
-    - [embassy-mcxa](https://docs.embassy.dev/embassy-mcxa/), for NXP's MCX-A series of microcontrollers.
-    - [esp-rs](https://github.com/esp-rs), for the Espressif Systems ESP32 series of chips.
-        - Embassy HAL support for Espressif chips, as well as Async Wi-Fi, Bluetooth, and ESP-NOW, is being developed in the [esp-rs/esp-hal](https://github.com/esp-rs/esp-hal) repository.
-    - [ch32-hal](https://github.com/ch32-rs/ch32-hal), for the WCH 32-bit RISC-V(CH32V) series of chips.
-    - [mpfs-hal](https://github.com/AlexCharlton/mpfs-hal), for the Microchip PolarFire SoC.
-    - [py32-hal](https://github.com/py32-rs/py32-hal), for the Puya Semiconductor PY32 series of microcontrollers.
+  - HALs implement safe, idiomatic Rust APIs to use the hardware capabilities, so raw register manipulation is not needed. The Embassy project maintains HALs for select hardware, but you can still use HALs from other projects with Embassy.
+  - [embassy-stm32](https://docs.embassy.dev/embassy-stm32/), for all STM32 microcontroller families.
+  - [embassy-nrf](https://docs.embassy.dev/embassy-nrf/), for the Nordic Semiconductor nRF52, nRF53, nRF54 and nRF91 series.
+  - [embassy-rp](https://docs.embassy.dev/embassy-rp/), for the Raspberry Pi RP2040 and RP23xx microcontrollers.
+  - [embassy-mspm0](https://docs.embassy.dev/embassy-mspm0/), for the Texas Instruments MSPM0 microcontrollers.
+  - [embassy-mcxa](https://docs.embassy.dev/embassy-mcxa/), for NXP's MCX-A series of microcontrollers.
+  - [esp-rs](https://github.com/esp-rs), for the Espressif Systems ESP32 series of chips.
+    - Embassy HAL support for Espressif chips, as well as Async Wi-Fi, Bluetooth, and ESP-NOW, is being developed in the [esp-rs/esp-hal](https://github.com/esp-rs/esp-hal) repository.
+  - [ch32-hal](https://github.com/ch32-rs/ch32-hal), for the WCH 32-bit RISC-V(CH32V) series of chips.
+  - [mpfs-hal](https://github.com/AlexCharlton/mpfs-hal), for the Microchip PolarFire SoC.
+  - [py32-hal](https://github.com/py32-rs/py32-hal), for the Puya Semiconductor PY32 series of microcontrollers.
 
 - **Time that Just Works** -
   No more messing with hardware timers. [embassy_time](https://docs.embassy.dev/embassy-time) provides Instant, Duration, and Timer types that are globally available and never overflow.
@@ -38,10 +40,10 @@ Rust's [async/await](https://rust-lang.github.io/async-book/) allows for unprece
   The [embassy-net](https://docs.embassy.dev/embassy-net/) network stack implements extensive networking functionality, including Ethernet, IP, TCP, UDP, ICMP, and DHCP. Async drastically simplifies managing timeouts and serving multiple connections concurrently.
 
 - **Bluetooth**
-    - The [trouble](https://github.com/embassy-rs/trouble) crate provides a Bluetooth Low Energy 4.x and 5.x Host that runs on any microcontroller implementing the [bt-hci](https://github.com/embassy-rs/bt-hci) traits (currently
+  - The [trouble](https://github.com/embassy-rs/trouble) crate provides a Bluetooth Low Energy 4.x and 5.x Host that runs on any microcontroller implementing the [bt-hci](https://github.com/embassy-rs/bt-hci) traits (currently
       `nRF52`, `nrf54`, `rp2040`, `rp23xx` and `esp32` and `serial` controllers are supported).
-    - The [nrf-softdevice](https://github.com/embassy-rs/nrf-softdevice) crate provides Bluetooth Low Energy 4.x and 5.x support for nRF52 microcontrollers.
-    - The [embassy-stm32-wpan](https://github.com/embassy-rs/embassy/tree/main/embassy-stm32-wpan) crate provides Bluetooth Low Energy 5.x support for stm32wb microcontrollers.
+  - The [nrf-softdevice](https://github.com/embassy-rs/nrf-softdevice) crate provides Bluetooth Low Energy 4.x and 5.x support for nRF52 microcontrollers.
+  - The [embassy-stm32-wpan](https://github.com/embassy-rs/embassy/tree/main/embassy-stm32-wpan) crate provides Bluetooth Low Energy 5.x support for stm32wb microcontrollers.
 
 - **LoRa** -
   The [lora-rs](https://github.com/lora-rs/lora-rs) project provides an async LoRa and LoRaWAN stack that works well on Embassy.
@@ -100,13 +102,13 @@ async fn main(spawner: Spawner) {
 Examples are found in the
 `examples/` folder separated by the chip manufacturer they are designed to run on. For example:
 
-* `examples/nrf52840` run on the
+- `examples/nrf52840` run on the
   `nrf52840-dk` board (PCA10056) but should be easily adaptable to other nRF52 chips and boards.
-* `examples/nrf5340` run on the `nrf5340-dk` board (PCA10095).
-* `examples/stm32xx` for the various STM32 families.
-* `examples/rp` are for the RP2040 and RP235x chips.
-* `examples/mcxa` run on the `FRDM-MCXA266` board.
-* `examples/std` are designed to run locally on your PC.
+- `examples/nrf5340` run on the `nrf5340-dk` board (PCA10095).
+- `examples/stm32xx` for the various STM32 families.
+- `examples/rp` are for the RP2040 and RP235x chips.
+- `examples/mcxa` run on the `FRDM-MCXA266` board.
+- `examples/std` are designed to run locally on your PC.
 
 ### Running examples
 

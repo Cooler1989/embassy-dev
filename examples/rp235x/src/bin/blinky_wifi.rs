@@ -49,7 +49,7 @@ bind_interrupts!(struct Irqs {
 const WIFI_NETWORK: &str = "TestWiFiNetworkDev";
 const WIFI_PASSWORD: &str = "testESP-idfconnection";
 
-static RESOURCES: StaticCell<StackResources<2>> = StaticCell::new();
+static RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
 
 #[embassy_executor::task]
 async fn logger_task(driver: Driver<'static, USB>) {
@@ -111,26 +111,14 @@ async fn main(spawner: Spawner) {
         .await;
 
     let config = Config::dhcpv4(Default::default());
-    //let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
-    //    address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 69, 2), 24),
-    //    dns_servers: Vec::new(),
-    //    gateway: Some(Ipv4Address::new(192, 168, 69, 1)),
-    //});
 
     // Generate random seed
     let seed = 0x0123_4567_89ab_cdef; // chosen by fair dice roll. guarenteed to be random.
 
-    // Init network stack
-    //  let stack = &*make_static!(Stack::new(
-    //      net_device,
-    //      config,
-    //      make_static!(StackResources::<2>::new()),
-    //      seed
-    //  ));
     let (stack, runner) = embassy_net::new(
         net_device, 
         config, 
-        RESOURCES.init(StackResources::<2>::new()),
+        RESOURCES.init(StackResources::<5>::new()),
         seed);
     /// // Launch network task that runs `runner.run().await`
     spawner.spawn(net_task_runner(runner).unwrap());
@@ -191,12 +179,5 @@ async fn main(spawner: Spawner) {
                 }
             };
         }
-        //  info!("led on!");
-        //  control.gpio_set(0, true).await;
-        //  Timer::after(delay).await;
-
-        //  info!("led off!");
-        //  control.gpio_set(0, false).await;
-        //  Timer::after(delay).await;
     }
 }
